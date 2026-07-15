@@ -25,6 +25,16 @@ class KlutchAccount::ProcessorTest < ActiveSupport::TestCase
     assert_in_delta 250.0, account.reload.cash_balance, 0.01
   end
 
+  test "sets available credit from the Klutch credit limit for credit cards" do
+    account = accounts(:credit_card)
+    klutch_account = create_klutch_account("kl_limit", account: account, balance: -250.0, credit_limit: 1000.0)
+
+    KlutchAccount::Processor.new(klutch_account).process
+
+    # $250 owed against a $1,000 limit leaves $750 of available credit.
+    assert_in_delta 750.0, account.reload.accountable.available_credit, 0.01
+  end
+
   # ---------------------------------------------------------------------------
   # no linked account
   # ---------------------------------------------------------------------------
@@ -64,10 +74,10 @@ class KlutchAccount::ProcessorTest < ActiveSupport::TestCase
 
   private
 
-    def create_klutch_account(external_id, account:, balance: nil, raw_transactions: [])
+    def create_klutch_account(external_id, account:, balance: nil, credit_limit: nil, raw_transactions: [])
       ka = @item.klutch_accounts.create!(
         name: external_id, klutch_account_id: external_id, currency: "USD",
-        account_type: "credit_card", current_balance: balance,
+        account_type: "credit_card", current_balance: balance, credit_limit: credit_limit,
         raw_transactions_payload: raw_transactions
       )
       AccountProvider.create!(provider: ka, account: account)

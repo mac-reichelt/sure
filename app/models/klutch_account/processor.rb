@@ -39,13 +39,14 @@ class KlutchAccount::Processor
   private
 
     def update_account_balance(account)
-      # Klutch has no balance endpoint; current_balance is the sum of settled
-      # transactions (negative when money is owed on the card).
+      # current_balance uses the internal cash-flow convention (negative = money
+      # owed on the card). It comes from the revolving-loan balance when Klutch
+      # exposes it, otherwise from the sum of settled transactions.
       balance = klutch_account.current_balance || 0
 
       # Banking sign convention:
       # - CreditCard and Loan accounts store a positive "amount owed".
-      # Klutch returns a negative sum for money owed, so we negate it.
+      # Klutch reports money owed as negative, so we negate it.
       if account.accountable_type == "CreditCard" || account.accountable_type == "Loan"
         balance = -balance
       end
@@ -62,5 +63,21 @@ class KlutchAccount::Processor
       # Create or update the current balance anchor valuation for linked accounts
       # This is critical for reverse sync to work correctly
       account.set_current_balance(balance)
+
+      update_available_credit(account, balance)
+    end
+
+    # Map the Klutch credit limit onto the CreditCard's available credit.
+    # `amount_owed` is the positive balance owed computed above.
+    def update_available_credit(account, amount_owed)
+      return unless account.accountable_type == "CreditCard"
+
+      limit = klutch_account.credit_limit
+      return if limit.blank?
+
+      Account::ProviderImportAdapter.new(account).update_accountable_attributes(
+        attributes: { available_credit: limit - amount_owed },
+        source: "klutch"
+      )
     end
 end

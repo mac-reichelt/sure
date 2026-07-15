@@ -141,8 +141,8 @@ class KlutchItem::Importer
       # Import transactions
       import_transactions(klutch_account, credentials)
 
-      # Derive and store balance from settled transactions (Klutch has no
-      # dedicated balance field).
+      # Fetch and store the account balance (revolving-loan balance + credit
+      # limit, falling back to a settled-transaction sum when unavailable).
       update_balance(klutch_account)
     end
 
@@ -190,10 +190,47 @@ class KlutchItem::Importer
       end
     end
 
-    # Derive a balance from the sum of SETTLED transactions. Klutch returns
+    # Fetch and store the account balance. Klutch/AlloyCard expose the current
+    # amount owed and credit limit via `account.revolvingLoan`; when available
+    # that is used as the authoritative balance. If the revolving-loan field is
+    # unavailable we fall back to summing settled transactions.
+    def update_balance(klutch_account)
+      revolving_loan = klutch_provider.get_balance
+      stats["api_requests"] = stats.fetch("api_requests", 0) + 1
+
+      if revolving_loan && revolving_loan[:balance]
+        # revolvingLoan.balance is a positive "amount owed". Store it using the
+        # internal cash-flow convention (negative = owed) that
+        # KlutchAccount::Processor expects, and keep the credit limit so the
+        # processor can derive available credit.
+        klutch_account.update!(
+          current_balance: -revolving_loan[:balance],
+          credit_limit: revolving_loan[:limit]
+        )
+        return
+      end
+
+      derive_balance_from_transactions(klutch_account)
+    rescue Provider::Klutch::AuthenticationError
+      raise
+    rescue => e
+      # Balance is best-effort; keep the previous value and record for support.
+      DebugLogEntry.capture(
+        category: "provider_sync",
+        level: "warn",
+        message: "Klutch balance update failed for account #{klutch_account.klutch_account_id}; keeping previous balance",
+        source: self.class.name,
+        provider_key: "klutch",
+        family: klutch_item.family,
+        metadata: { account_id: klutch_account.klutch_account_id, error_class: e.class.name, error: e.message }
+      )
+      Rails.logger.warn "KlutchItem::Importer - Failed to update balance for account #{klutch_account.id}: #{e.message}"
+    end
+
+    # Fallback balance derivation: sum SETTLED transactions. Klutch returns
     # charges as negative amounts, so a card with money owed sums negative;
     # KlutchAccount::Processor negates it for the CreditCard display balance.
-    def update_balance(klutch_account)
+    def derive_balance_from_transactions(klutch_account)
       start_date = balance_window_start(klutch_account)
 
       balance = klutch_provider.sum_transactions(
@@ -208,20 +245,6 @@ class KlutchItem::Importer
       return if balance.nil?
 
       klutch_account.update!(current_balance: balance)
-    rescue Provider::Klutch::AuthenticationError
-      raise
-    rescue => e
-      # Balance is best-effort; keep the previous value and record for support.
-      DebugLogEntry.capture(
-        category: "provider_sync",
-        level: "warn",
-        message: "Klutch balance derivation failed for account #{klutch_account.klutch_account_id}; keeping previous balance",
-        source: self.class.name,
-        provider_key: "klutch",
-        family: klutch_item.family,
-        metadata: { account_id: klutch_account.klutch_account_id, error_class: e.class.name, error: e.message }
-      )
-      Rails.logger.warn "KlutchItem::Importer - Failed to derive balance for account #{klutch_account.id}: #{e.message}"
     end
 
     def transaction_statuses

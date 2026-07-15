@@ -86,6 +86,38 @@ class Provider::KlutchTest < ActiveSupport::TestCase
     end
   end
 
+  test "get_balance returns the revolving-loan balance and limit as BigDecimals" do
+    balance_body = {
+      data: { account: { revolvingLoan: { balance: "500.0", limit: "1000.0" } } }
+    }.to_json
+
+    responses = [ token_response, FakeResponse.new(code: 200, message: "OK", body: balance_body) ]
+    requests = []
+
+    Provider::Klutch.stub(:post, ->(url, headers:, body:) {
+      requests << { headers: headers, body: JSON.parse(body) }
+      responses.shift
+    }) do
+      client = Provider::Klutch.new(client_id: "client", secret_key: "secret")
+      result = client.get_balance
+
+      assert_equal BigDecimal("500.0"), result[:balance]
+      assert_equal BigDecimal("1000.0"), result[:limit]
+    end
+
+    # The balance query reads the revolving loan nested under the account.
+    assert_includes requests.second[:body]["query"], "revolvingLoan"
+  end
+
+  test "get_balance returns nil when the account has no revolving loan" do
+    responses = [ token_response, FakeResponse.new(code: 200, message: "OK", body: { data: { account: {} } }.to_json) ]
+
+    Provider::Klutch.stub(:post, ->(_url, headers:, body:) { responses.shift }) do
+      client = Provider::Klutch.new(client_id: "client", secret_key: "secret")
+      assert_nil client.get_balance
+    end
+  end
+
   test "raises AuthenticationError when the token mutation returns GraphQL errors" do
     error_response = FakeResponse.new(
       code: 200, message: "OK",

@@ -41,9 +41,10 @@ class KlutchAccount < ApplicationRecord
   end
 
   # Map a normalized Klutch account payload onto this record.
-  # NOTE: current_balance is intentionally NOT set here — Klutch exposes no
-  # balance field, so KlutchItem::Importer derives it from settled transactions
-  # separately. Overwriting it here would clobber that derived value with nil.
+  # NOTE: current_balance / credit_limit are intentionally NOT set here — they
+  # are fetched separately by KlutchItem::Importer#update_balance (from the
+  # revolving-loan balance, or a settled-transaction sum fallback). Overwriting
+  # them here would clobber those values with nil.
   def upsert_from_klutch!(account_data)
     data = sdk_object_to_hash(account_data).with_indifferent_access
 

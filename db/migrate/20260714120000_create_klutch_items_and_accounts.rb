@@ -48,6 +48,7 @@ class CreateKlutchItemsAndAccounts < ActiveRecord::Migration[7.2]
       # Account details
       t.string :currency
       t.decimal :current_balance, precision: 19, scale: 4
+      t.decimal :credit_limit, precision: 19, scale: 4
       t.string :account_status
       t.string :account_type
       t.string :provider

@@ -62,6 +62,39 @@ class Provider::Klutch
     nil
   end
 
+  # Fetch the account's outstanding balance and credit limit.
+  #
+  # Klutch/AlloyCard model the card as a revolving loan, exposing the current
+  # amount owed via `account.revolvingLoan.balance` and the credit limit via
+  # `account.revolvingLoan.limit`. `balance` is treated as a positive "amount
+  # owed".
+  #
+  # TODO(klutch): verify against a sandbox that `balance` is a positive amount
+  # owed (rather than a negative liability); the importer's sign conversion
+  # depends on this assumption.
+  #
+  # Returns { balance: BigDecimal|nil, limit: BigDecimal|nil }, or nil when the
+  # revolving-loan field is unavailable (e.g. an older schema or an account with
+  # no revolving loan), so callers can fall back to summing settled transactions.
+  def get_balance
+    data = execute(ACCOUNT_BALANCE_QUERY, operation_name: "get_balance")
+    revolving_loan = data.dig(:account, :revolvingLoan)
+    return nil if revolving_loan.blank?
+
+    revolving_loan = revolving_loan.with_indifferent_access
+    {
+      balance: to_big_decimal(revolving_loan[:balance]),
+      limit: to_big_decimal(revolving_loan[:limit])
+    }
+  rescue AuthenticationError
+    raise
+  rescue Error => e
+    # revolvingLoan is not guaranteed on every account/schema version; treat a
+    # non-auth failure as "no balance data" rather than aborting the sync.
+    Rails.logger.warn "Provider::Klutch - get_balance failed: #{e.message}"
+    nil
+  end
+
   # Fetch transactions within a date window.
   # statuses: array of transaction statuses (e.g. %w[SETTLED PENDING])
   # types:    array of transaction types (e.g. %w[CHARGE PAYMENT])
@@ -72,16 +105,13 @@ class Provider::Klutch
     normalize_list(data[:transactions])
   end
 
-  # Aggregate the amount of transactions within a window.
-  # Used to derive an account balance, since Klutch exposes no balance field.
-  # Returns a BigDecimal (raw Klutch sign convention: charges are negative).
+  # Aggregate the amount of transactions within a window. Used as a fallback for
+  # balance derivation when the revolving-loan balance (see #get_balance) is
+  # unavailable. Returns a BigDecimal (raw Klutch sign: charges are negative).
   def sum_transactions(start_date:, end_date: Date.current, statuses: nil, types: nil)
     filter = build_transaction_filter(start_date: start_date, end_date: end_date, statuses: statuses, types: types)
     data = execute(SUM_TRANSACTIONS_QUERY, variables: { filter: filter }, operation_name: "sum_transactions")
-    value = data[:sumTransactions]
-    value.nil? ? nil : BigDecimal(value.to_s)
-  rescue ArgumentError
-    nil
+    to_big_decimal(data[:sumTransactions])
   end
 
   # Obtain (and memoize) a session JWT for the configured credentials.
@@ -120,6 +150,17 @@ class Provider::Klutch
       query AccountInfo {
         account {
           id
+        }
+      }
+    GRAPHQL
+
+    ACCOUNT_BALANCE_QUERY = <<~GRAPHQL
+      query AccountBalance {
+        account {
+          revolvingLoan {
+            balance
+            limit
+          }
         }
       }
     GRAPHQL
@@ -204,6 +245,14 @@ class Provider::Klutch
       value.respond_to?(:iso8601) ? value.to_time.utc.iso8601 : value.to_s
     end
 
+    def to_big_decimal(value)
+      return nil if value.nil?
+
+      BigDecimal(value.to_s)
+    rescue ArgumentError
+      nil
+    end
+
     # Klutch's `transactions`/`cards` fields are assumed to be plain lists, but
     # defensively handle a Relay-style connection ({ edges: [{ node: {...} }] })
     # in case the schema differs.
@@ -230,8 +279,8 @@ class Provider::Klutch
     end
 
     def authenticated_headers
-      # TODO(klutch): confirm the "Bearer" scheme prefix. Some AlloyCard
-      # deployments accept the raw JWT in the Authorization header instead.
+      # AlloyCard authenticates the JWT via the standard "Bearer" scheme,
+      # confirmed against Klutch's official api-samples.
       base_headers.merge("Authorization" => "Bearer #{session_token}")
     end
 
