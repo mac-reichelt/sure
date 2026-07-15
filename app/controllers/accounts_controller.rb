@@ -29,6 +29,7 @@ class AccountsController < ApplicationController
     @binance_items = visible_provider_items(family.binance_items.ordered.includes(:binance_accounts, :accounts, :syncs))
     @questrade_items = visible_provider_items(family.questrade_items.ordered.includes(:syncs, questrade_accounts: :account_provider))
     @wise_items = visible_provider_items(family.wise_items.ordered.includes(:syncs, :wise_accounts))
+    @klutch_items = visible_provider_items(family.klutch_items.ordered.includes(:syncs, :klutch_accounts))
 
     # Build sync stats maps for all providers
     build_sync_stats_maps
@@ -336,6 +337,13 @@ class AccountsController < ApplicationController
       @lunchflow_items.each do |item|
         latest_sync = item.syncs.ordered.first
         @lunchflow_sync_stats_map[item.id] = latest_sync&.sync_stats || {}
+      end
+
+      # Klutch sync stats
+      @klutch_sync_stats_map = {}
+      @klutch_items.each do |item|
+        latest_sync = item.syncs.ordered.first
+        @klutch_sync_stats_map[item.id] = latest_sync&.sync_stats || {}
       end
 
       # Akahu sync stats

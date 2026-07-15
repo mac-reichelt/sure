@@ -366,6 +366,7 @@ en:
         questrade: Sync your Questrade investment accounts directly via the Questrade API.
         indexa_capital: Track your Indexa Capital automated investment portfolio.
         sophtron: Connect US & Canadian banks and utilities.
+        klutch: Sync your Klutch programmable credit card transactions via the Klutch developer API.
         plaid: Connect thousands of US financial institutions via Plaid.
         plaid_eu: Connect European financial institutions via Plaid (PSD2 / Open Banking).
       search_filters:

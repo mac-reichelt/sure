@@ -198,7 +198,8 @@ class Settings::ProvidersController < ApplicationController
       { key: "ibkr",           title: "Interactive Brokers", turbo_id: "ibkr",      partial: "ibkr_panel" },
       { key: "indexa_capital", title: "Indexa Capital",  turbo_id: "indexa_capital", partial: "indexa_capital_panel" },
       { key: "sophtron",       title: "Sophtron",        turbo_id: "sophtron",       partial: "sophtron_panel" },
-      { key: "questrade",      title: "Questrade",       turbo_id: "questrade",      partial: "questrade_panel" }
+      { key: "questrade",      title: "Questrade",       turbo_id: "questrade",      partial: "questrade_panel" },
+      { key: "klutch",         title: "Klutch",          turbo_id: "klutch",         partial: "klutch_panel" }
     ].freeze
 
     FAMILY_PANEL_KEYS = FAMILY_PANELS.map { |p| p[:key] }.freeze
@@ -221,7 +222,8 @@ class Settings::ProvidersController < ApplicationController
       "questrade"      => "QuestradeItem",
       "ibkr"           => "IbkrItem",
       "indexa_capital" => "IndexaCapitalItem",
-      "sophtron"       => "SophtronItem"
+      "sophtron"       => "SophtronItem",
+      "klutch"         => "KlutchItem"
     }.freeze
 
     def load_provider_items(provider_key)
@@ -260,6 +262,8 @@ class Settings::ProvidersController < ApplicationController
         @sophtron_items = Current.family.sophtron_items.ordered
       when "questrade"
         @questrade_items = Current.family.questrade_items.active.ordered
+      when "klutch"
+        @klutch_items = Current.family.klutch_items.ordered
       end
     end
 
@@ -290,6 +294,7 @@ class Settings::ProvidersController < ApplicationController
       @binance_items = Current.family.binance_items.active.ordered
       @kraken_items = Current.family.kraken_items.active.ordered
       @questrade_items = Current.family.questrade_items.active.ordered.select(:id)
+      @klutch_items = Current.family.klutch_items.where.not(client_id: [ nil, "" ]).ordered.select(:id)
 
       @provider_sync_health = compute_provider_sync_health(family_panel_items)
 
@@ -323,7 +328,8 @@ class Settings::ProvidersController < ApplicationController
         "questrade"      => @questrade_items,
         "ibkr"           => @ibkr_items,
         "indexa_capital" => @indexa_capital_items,
-        "sophtron"       => @sophtron_items
+        "sophtron"       => @sophtron_items,
+        "klutch"         => @klutch_items
       }
     end
 
