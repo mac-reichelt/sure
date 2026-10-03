@@ -12,8 +12,8 @@
 #
 # NOTE: Klutch does not publish an official Ruby SDK and introspection is
 # disabled on their endpoint, so the queries below were reverse-engineered.
-# A few assumptions are flagged with TODO(klutch) and should be verified
-# against a live sandbox account before relying on them in production.
+# Queries were reverse-engineered and should be verified against a live
+# sandbox account before relying on them in production.
 class Provider::Klutch
   include HTTParty
 
@@ -66,12 +66,9 @@ class Provider::Klutch
   #
   # Klutch/AlloyCard model the card as a revolving loan, exposing the current
   # amount owed via `account.revolvingLoan.balance` and the credit limit via
-  # `account.revolvingLoan.limit`. `balance` is treated as a positive "amount
-  # owed".
-  #
-  # TODO(klutch): verify against a sandbox that `balance` is a positive amount
-  # owed (rather than a negative liability); the importer's sign conversion
-  # depends on this assumption.
+  # `account.revolvingLoan.limit`. Klutch's public samples do not specify the
+  # revolving-loan balance sign, so the importer normalizes its magnitude before
+  # storing it using Sure's liability convention.
   #
   # Returns { balance: BigDecimal|nil, limit: BigDecimal|nil }, or nil when the
   # revolving-loan field is unavailable (e.g. an older schema or an account with
@@ -86,13 +83,6 @@ class Provider::Klutch
       balance: to_big_decimal(revolving_loan[:balance]),
       limit: to_big_decimal(revolving_loan[:limit])
     }
-  rescue AuthenticationError
-    raise
-  rescue Error => e
-    # revolvingLoan is not guaranteed on every account/schema version; treat a
-    # non-auth failure as "no balance data" rather than aborting the sync.
-    Rails.logger.warn "Provider::Klutch - get_balance failed: #{e.message}"
-    nil
   end
 
   # Fetch transactions within a date window.

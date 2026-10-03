@@ -118,6 +118,20 @@ class Provider::KlutchTest < ActiveSupport::TestCase
     end
   end
 
+  test "get_balance raises API errors so the importer can record and handle them" do
+    responses = [
+      token_response,
+      FakeResponse.new(code: 500, message: "Server Error", body: "{}")
+    ]
+
+    Provider::Klutch.stub(:post, ->(_url, headers:, body:) { responses.shift }) do
+      client = Provider::Klutch.new(client_id: "client", secret_key: "secret")
+
+      error = assert_raises(Provider::Klutch::Error) { client.get_balance }
+      assert_equal :server_error, error.error_type
+    end
+  end
+
   test "raises AuthenticationError when the token mutation returns GraphQL errors" do
     error_response = FakeResponse.new(
       code: 200, message: "OK",

@@ -195,24 +195,29 @@ class KlutchItem::Importer
     # that is used as the authoritative balance. If the revolving-loan field is
     # unavailable we fall back to summing settled transactions.
     def update_balance(klutch_account)
-      revolving_loan = klutch_provider.get_balance
-      stats["api_requests"] = stats.fetch("api_requests", 0) + 1
+      revolving_loan = begin
+        klutch_provider.get_balance
+      rescue Provider::Klutch::Error => e
+        log_balance_fetch_failure(klutch_account, e)
+        nil
+      ensure
+        stats["api_requests"] = stats.fetch("api_requests", 0) + 1
+      end
+      revolving_loan = revolving_loan.with_indifferent_access if revolving_loan.respond_to?(:with_indifferent_access)
 
       if revolving_loan && revolving_loan[:balance]
-        # revolvingLoan.balance is a positive "amount owed". Store it using the
-        # internal cash-flow convention (negative = owed) that
-        # KlutchAccount::Processor expects, and keep the credit limit so the
-        # processor can derive available credit.
+        # A revolving-loan balance is a liability; normalize its sign because
+        # Klutch's public samples do not document the API's sign convention.
+        # KlutchAccount::Processor expects negative = owed internally.
         klutch_account.update!(
-          current_balance: -revolving_loan[:balance],
+          current_balance: -revolving_loan[:balance].abs,
           credit_limit: revolving_loan[:limit]
         )
         return
       end
 
-      derive_balance_from_transactions(klutch_account)
-    rescue Provider::Klutch::AuthenticationError
-      raise
+      fallback_reason = revolving_loan.nil? ? "balance_response_unavailable" : "balance_value_missing"
+      derive_balance_from_transactions(klutch_account, fallback_reason: fallback_reason)
     rescue => e
       # Balance is best-effort; keep the previous value and record for support.
       DebugLogEntry.capture(
@@ -230,7 +235,7 @@ class KlutchItem::Importer
     # Fallback balance derivation: sum SETTLED transactions. Klutch returns
     # charges as negative amounts, so a card with money owed sums negative;
     # KlutchAccount::Processor negates it for the CreditCard display balance.
-    def derive_balance_from_transactions(klutch_account)
+    def derive_balance_from_transactions(klutch_account, fallback_reason:)
       start_date = balance_window_start(klutch_account)
 
       balance = klutch_provider.sum_transactions(
@@ -245,6 +250,52 @@ class KlutchItem::Importer
       return if balance.nil?
 
       klutch_account.update!(current_balance: balance)
+      log_balance_fallback(klutch_account, fallback_reason:)
+    end
+
+    def log_balance_fetch_failure(klutch_account, error)
+      message = "Klutch revolving-loan balance fetch failed for account #{klutch_account.id} " \
+        "(#{klutch_account.klutch_account_id}): #{error.class}: #{error.message}; falling back to settled transactions"
+
+      DebugLogEntry.capture(
+        category: "provider_sync",
+        level: "warn",
+        message: message,
+        source: self.class.name,
+        provider_key: "klutch",
+        family: klutch_item.family,
+        account: klutch_account.current_account,
+        account_provider: klutch_account.account_provider,
+        metadata: {
+          klutch_item_id: klutch_item.id,
+          klutch_account_id: klutch_account.id,
+          account_id: klutch_account.klutch_account_id,
+          error_class: error.class.name,
+          error: error.message
+        }
+      )
+      Rails.logger.warn(message)
+    end
+
+    def log_balance_fallback(klutch_account, fallback_reason:)
+      DebugLogEntry.capture(
+        category: "provider_sync",
+        level: "warn",
+        message: "Using settled-transaction balance fallback for Klutch account #{klutch_account.id} " \
+          "(#{klutch_account.klutch_account_id})",
+        source: self.class.name,
+        provider_key: "klutch",
+        family: klutch_item.family,
+        account: klutch_account.current_account,
+        account_provider: klutch_account.account_provider,
+        metadata: {
+          klutch_item_id: klutch_item.id,
+          klutch_account_id: klutch_account.id,
+          account_id: klutch_account.klutch_account_id,
+          balance_source: "settled_transactions",
+          fallback_reason: fallback_reason
+        }
+      )
     end
 
     def transaction_statuses
