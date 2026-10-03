@@ -67,7 +67,7 @@ class KlutchAccount::ProcessorTest < ActiveSupport::TestCase
       ]
     )
 
-    assert_difference "account.entries.count", 1 do
+    assert_difference 'account.entries.where(source: "klutch").count', 1 do
       KlutchAccount::Processor.new(klutch_account).process
     end
   end

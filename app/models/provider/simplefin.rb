@@ -1,9 +1,10 @@
 class Provider::Simplefin
   # Pending: some institutions do not return pending transactions even with `pending=1`.
-  # This is provider variability (not a bug). For troubleshooting, you can set
-  # `SIMPLEFIN_INCLUDE_PENDING=1` and/or `SIMPLEFIN_DEBUG_RAW=1` (both default-off).
-  # These are centralized in `Rails.configuration.x.simplefin.*` via
-  # `config/initializers/simplefin.rb`.
+  # This is provider variability (not a bug). The importer resolves pending inclusion
+  # from its explicit argument, SIMPLEFIN_INCLUDE_PENDING, or Setting.syncs_include_pending
+  # (default-on without overrides), then passes pending: to this client.
+  # SIMPLEFIN_DEBUG_RAW=1 enables raw payload logging (default-off); environment
+  # configuration lives in config/initializers/simplefin.rb.
   include HTTParty
   extend SslConfigurable
 
@@ -66,7 +67,11 @@ class Provider::Simplefin
       query_params["end-date"] = end_timestamp.to_s
     end
 
-    query_params["pending"] = pending ? "1" : "0" unless pending.nil?
+    # Per the SimpleFIN protocol, pending transactions are excluded by default
+    # and only included when `pending=1` is present. Bridges presence-check the
+    # param, so sending `pending=0` behaves like `pending=1` — the only
+    # spec-compliant way to exclude pending is to omit the param entirely.
+    query_params["pending"] = "1" if pending
 
     accounts_url = "#{access_url}/accounts"
     accounts_url += "?#{URI.encode_www_form(query_params)}" unless query_params.empty?

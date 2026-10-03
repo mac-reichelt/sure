@@ -211,13 +211,13 @@ class Provider::Klutch
       end
 
       data = handle_response(response, authenticating: true)
-      token = data[:createSessionToken]
+      session_jwt = data[:createSessionToken]
 
-      if token.blank?
+      if session_jwt.blank?
         raise AuthenticationError.new("Klutch did not return a session token", :unauthorized)
       end
 
-      token
+      session_jwt
     end
 
     # Execute an authenticated GraphQL query/mutation.

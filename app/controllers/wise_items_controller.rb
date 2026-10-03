@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 class WiseItemsController < ApplicationController
-  before_action :set_wise_item, only: [ :show, :edit, :update, :destroy, :sync, :setup_accounts, :complete_account_setup ]
+  before_action :set_wise_item, only: [ :show, :edit, :update, :destroy, :sync, :setup_accounts, :complete_account_setup, :generate_sca_keypair ]
   before_action :require_admin!, except: [ :index ]
 
   def index
@@ -36,11 +36,10 @@ class WiseItemsController < ApplicationController
     end
 
     session[:wise_pending_profiles] = profiles
-    @pending_profiles = profiles
-    @existing_profile_ids = Current.family.wise_items.pluck(:profile_id).map(&:to_s).to_set
-    @encrypted_pending_token = encrypt_pending_token(token)
+    session[:wise_pending_encrypted_token] = encrypt_pending_token(token)
+    session[:wise_pending_import_all_history] = params.dig(:wise_item, :import_all_history) == "1"
 
-    render :select_profiles
+    redirect_to select_profiles_wise_items_path
   rescue Provider::Wise::WiseError => e
     @wise_item = Current.family.wise_items.build
     error_key = e.error_type == :unauthorized ? ".invalid_token" : ".connection_failed"
@@ -51,9 +50,10 @@ class WiseItemsController < ApplicationController
   # Step 2: Show profile selection.
   def select_profiles
     @pending_profiles = session[:wise_pending_profiles]
+    @encrypted_pending_token = session[:wise_pending_encrypted_token]
 
-    if @pending_profiles.blank?
-      redirect_to new_wise_item_path, alert: t(".session_expired") and return
+    if @pending_profiles.blank? || @encrypted_pending_token.blank?
+      redirect_to settings_providers_path, alert: t(".session_expired") and return
     end
 
     @existing_profile_ids = Current.family.wise_items.pluck(:profile_id).map(&:to_s).to_set
@@ -61,17 +61,19 @@ class WiseItemsController < ApplicationController
 
   # Step 3: Create one WiseItem per selected profile.
   def link_profiles
-    token = decrypt_pending_token(params[:encrypted_pending_token]) # pipelock:ignore
+    token = decrypt_pending_token(session[:wise_pending_encrypted_token]) # pipelock:ignore
     profiles = session[:wise_pending_profiles]
 
     if token.blank? || profiles.blank?
-      redirect_to new_wise_item_path, alert: t(".session_expired") and return
+      redirect_to settings_providers_path, alert: t(".session_expired") and return
     end
 
     selected_ids = Array(params[:profile_ids]).map(&:to_s).compact_blank
     if selected_ids.empty?
       redirect_to select_profiles_wise_items_path, alert: t(".no_profiles_selected") and return
     end
+
+    import_all_history = session[:wise_pending_import_all_history] || false
 
     created = 0
     profiles.each do |profile|
@@ -86,12 +88,15 @@ class WiseItemsController < ApplicationController
         token: token,
         profile_id: profile_id,
         profile_type: profile_type,
-        item_name: display_name
+        item_name: display_name,
+        import_all_history: import_all_history
       )
       created += 1
     end
 
     session.delete(:wise_pending_profiles)
+    session.delete(:wise_pending_encrypted_token)
+    session.delete(:wise_pending_import_all_history)
 
     if created.zero?
       redirect_to settings_providers_path, alert: t(".already_connected")
@@ -120,6 +125,7 @@ class WiseItemsController < ApplicationController
 
   def sync
     @wise_item.sync_later unless @wise_item.syncing?
+    return render_provider_panel("wise", notice: t("settings.providers.sync_provider_in_progress")) if provider_panel_form?
 
     respond_to do |format|
       format.html { redirect_back_or_to accounts_path }
@@ -129,6 +135,18 @@ class WiseItemsController < ApplicationController
 
   def setup_accounts
     @wise_accounts = @wise_item.wise_accounts.unlinked
+  end
+
+  # Generates a fresh SCA keypair for this item. The private key is stored
+  # (encrypted); the public key is derived from it on every render so the user
+  # can register it with Wise. Regenerating invalidates the previous keypair.
+  def generate_sca_keypair
+    @wise_item.generate_sca_keypair!
+    render_provider_panel_success(t(".success"))
+  rescue => e
+    Rails.logger.error "WiseItemsController#generate_sca_keypair - #{e.class}: #{e.message}"
+    @wise_item.errors.add(:base, t(".failed"))
+    render_provider_panel_error
   end
 
   def complete_account_setup
@@ -229,7 +247,7 @@ class WiseItemsController < ApplicationController
     end
 
     def wise_item_update_params
-      permitted = params.require(:wise_item).permit(:name, :sync_start_date, :token)
+      permitted = params.require(:wise_item).permit(:name, :sync_start_date, :import_all_history, :token)
       permitted.delete(:token) if @wise_item.persisted? && permitted[:token].blank?
       permitted[:token] = permitted[:token].to_s.strip if permitted[:token].present?
       permitted
@@ -264,30 +282,12 @@ class WiseItemsController < ApplicationController
     end
 
     def render_provider_panel_success(message)
-      return redirect_to accounts_path, notice: message, status: :see_other unless turbo_frame_request?
-
-      flash.now[:notice] = message
-      @wise_items = Current.family.wise_items.active.ordered.includes(:syncs, :wise_accounts)
-      render_wise_provider_panel(locals: { wise_items: @wise_items }, include_flash: true)
+      render_provider_panel("wise", notice: message, fallback_path: accounts_path,
+                            wise_items: Current.family.wise_items.active.ordered.includes(:syncs, :wise_accounts))
     end
 
     def render_provider_panel_error
-      @error_message = @wise_item.errors.full_messages.join(", ")
-      return redirect_to settings_providers_path, alert: @error_message, status: :see_other unless turbo_frame_request?
-
-      render_wise_provider_panel(locals: { error_message: @error_message }, status: :unprocessable_entity)
-    end
-
-    def render_wise_provider_panel(locals:, status: :ok, include_flash: false)
-      streams = [
-        turbo_stream.replace(
-          "wise-providers-panel",
-          partial: "settings/providers/wise_panel",
-          locals: locals
-        )
-      ]
-      streams += flash_notification_stream_items if include_flash
-      render turbo_stream: streams, status: status
+      render_provider_panel("wise", alert: @wise_item.errors.full_messages.join(", "))
     end
 
     def encrypt_pending_token(token)

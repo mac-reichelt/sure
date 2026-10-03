@@ -30,6 +30,28 @@ require "rails/generators/active_record"
 class Provider::FamilyGenerator < Rails::Generators::NamedBase
   include Rails::Generators::Migration
 
+  # Columns the migration template already defines on the items table. A provider whose
+  # API happens to use one of these names (institution_id is the obvious one) would
+  # otherwise emit a duplicate t.string and abort db:migrate with
+  # "you can't define an already defined column".
+  #
+  # Declaring one is rejected rather than silently dropped. parsed_fields feeds eight
+  # other templates (model validations and encryption, panel form inputs, controller
+  # params, locale strings, adapter, SDK), so filtering it out of the migration alone
+  # would leave the field generating a form input and a validation with no column of the
+  # declared type behind it: `institution_id:integer` would render a numeric input over
+  # the built-in string column. Rejecting keeps the generated code self-consistent.
+  #
+  # family_id is listed, family is NOT: the template writes `t.references :family`, which
+  # creates the family_id column, so a field literally named family is not a collision.
+  RESERVED_ITEM_COLUMNS = %w[
+    family_id name
+    institution_id institution_name institution_domain institution_url institution_color
+    status scheduled_for_deletion pending_account_setup
+    sync_start_date raw_payload raw_institution_payload
+    created_at updated_at id
+  ].freeze
+
   source_root File.expand_path("templates", __dir__)
 
   argument :fields, type: :array, default: [], banner: "field:type[:secret] field:type[:secret]"
@@ -46,6 +68,15 @@ class Provider::FamilyGenerator < Rails::Generators::NamedBase
   def validate_fields
     if parsed_fields.empty?
       say "Warning: No fields specified. You'll need to add them manually later.", :yellow
+    end
+
+    reserved = parsed_fields.map { |f| f[:name] } & RESERVED_ITEM_COLUMNS
+    if reserved.any?
+      raise Thor::Error,
+            "#{reserved.join(', ')} #{reserved.one? ? 'is' : 'are'} already provided by the " \
+            "items table. Remove #{reserved.one? ? 'it' : 'them'} from the command: the " \
+            "standard column serves the same purpose, and redeclaring would abort db:migrate " \
+            "with \"you can't define an already defined column\"."
     end
 
     # Validate field types
@@ -309,61 +340,6 @@ class Provider::FamilyGenerator < Rails::Generators::NamedBase
     return unless File.exist?(controller_path)
 
     content = File.read(controller_path)
-    new_condition = "config.provider_key.to_s.casecmp(\"#{file_name}\").zero?"
-
-    # Check if provider is already excluded
-    if content.include?(new_condition)
-      say "Settings controller already excludes #{file_name}", :skip
-      return
-    end
-
-    # Add to the rejection list in prepare_show_context
-    # Look for the end of the reject block and insert before it
-    if content.include?("reject do |config|")
-      # Find the reject block's end and insert our condition before it
-      # The block ends with "end" on its own line after the conditions
-      lines = content.lines
-      reject_block_start = nil
-      reject_block_end = nil
-
-      lines.each_with_index do |line, index|
-        if line.include?("Provider::ConfigurationRegistry.all.reject do |config|")
-          reject_block_start = index
-        elsif reject_block_start && line.strip == "end" && reject_block_end.nil?
-          reject_block_end = index
-          break
-        end
-      end
-
-      if reject_block_start && reject_block_end
-        # Find the last condition line (the one before 'end')
-        last_condition_index = reject_block_end - 1
-
-        # Get indentation from the last condition line
-        last_condition_line = lines[last_condition_index]
-        indentation = last_condition_line[/^\s*/]
-
-        # Append our condition with || to the last condition line
-        # Remove trailing whitespace/newline, add || and new condition
-        lines[last_condition_index] = last_condition_line.rstrip + " || \\\n#{indentation}#{new_condition}\n"
-
-        write_file(controller_path, lines.join)
-        say "Added #{file_name} to provider exclusion list", :green
-      else
-        say "Could not find reject block boundaries in settings controller", :yellow
-      end
-    elsif content.include?("@provider_configurations = Provider::ConfigurationRegistry.all")
-      # No reject block exists yet, create one
-      gsub_file controller_path,
-                "@provider_configurations = Provider::ConfigurationRegistry.all\n",
-                "@provider_configurations = Provider::ConfigurationRegistry.all.reject do |config|\n        #{new_condition}\n      end\n"
-      say "Created provider exclusion block with #{file_name}", :green
-    else
-      say "Could not find provider_configurations assignment in settings controller", :yellow
-    end
-
-    # Re-read content after potential modifications
-    content = File.read(controller_path)
 
     # Add instance variable for items
     items_var = "@#{file_name}_items"
@@ -391,31 +367,26 @@ class Provider::FamilyGenerator < Rails::Generators::NamedBase
     end
   end
 
-  def update_providers_view
+  # Bank sync renders a provider's connection row and drawer from FAMILY_PANELS, and
+  # FAMILY_PANEL_KEYS keeps it out of the global provider forms. A connected provider
+  # moves under Your connections through its provider_summary case, and the row's sync
+  # status and Sync button read PANEL_SYNCABLE_TYPES and family_panel_items. The row
+  # renders the panel partial, so --skip-view skips all four.
+  def add_bank_sync_entries
     return if options[:skip_view]
 
-    view_path = "app/views/settings/providers/show.html.erb"
-    return unless File.exist?(view_path)
-
-    content = File.read(view_path)
-
-    # Check if section already exists
-    if content.include?("\"#{file_name}-providers-panel\"")
-      say "Providers view already has #{class_name} section", :skip
-    else
-      # Add section before the last closing div (at end of file)
-      section_content = <<~ERB
-
-  <%= settings_section title: "#{class_name}", collapsible: true, open: false do %>
-    <turbo-frame id="#{file_name}-providers-panel">
-      <%= render "settings/providers/#{file_name}_panel" %>
-    </turbo-frame>
-  <% end %>
-      ERB
-
-      # Insert before the final </div> at the end of file
-      insert_into_file view_path, section_content, before: /^<\/div>\s*\z/
-      say "Added #{class_name} section to providers view", :green
+    controller_path = "app/controllers/settings/providers_controller.rb"
+    add_bank_sync_entry(controller_path, "FAMILY_PANELS", "key: \"#{file_name}\"") do |content|
+      self.class.append_family_panel_entry(content, key: file_name, title: class_name.titleize)
+    end
+    add_bank_sync_entry(controller_path, "PANEL_SYNCABLE_TYPES", "=> \"#{class_name}Item\"") do |content|
+      self.class.append_panel_syncable_type(content, key: file_name, class_name: class_name)
+    end
+    add_bank_sync_entry(controller_path, "family_panel_items", "=> @#{file_name}_items") do |content|
+      self.class.append_family_panel_item(content, key: file_name)
+    end
+    add_bank_sync_entry("app/helpers/settings_helper.rb", "provider_summary", "when \"#{file_name}\"") do |content|
+      self.class.append_provider_summary_case(content, key: file_name)
     end
   end
 
@@ -555,7 +526,7 @@ class Provider::FamilyGenerator < Rails::Generators::NamedBase
     say "     - test/models/#{file_name}_account/processor_test.rb"
     say "  🛣️  Routes: Updated config/routes.rb"
     say "  🌐 Locale: config/locales/views/#{file_name}_items/en.yml"
-    say "  ⚙️  Settings: Updated controllers, views, and Family model"
+    say "  ⚙️  Settings: Updated controllers, settings helper and Family model"
 
     if parsed_fields.any?
       say "\nCredential fields:", :cyan
@@ -613,7 +584,121 @@ class Provider::FamilyGenerator < Rails::Generators::NamedBase
     ActiveRecord::Generators::Base.next_migration_number(dirname)
   end
 
+  # Appends `name` as the final entry of the `enum :source, { ... }` hash in `content`.
+  # Returns the updated source, or nil when no such hash is present.
+  #
+  # Pure string transformation, extracted from the generator so the comma and
+  # indentation handling can be tested directly. Both are easy to get wrong and fail as
+  # a SyntaxError in an unrelated file rather than anything pointing back here:
+  #
+  #   - appending before the closing brace of a MULTI-LINE hash puts the entry on its own
+  #     line after Ruby has already ended the expression
+  #   - a hash written with a TRAILING COMMA already supplies the separator, so adding
+  #     another yields `redbark: "redbark",,`
+  #   - an EMPTY hash needs no separator, so adding one yields `{, gocardless: "..."}`
+  def self.append_source_enum_entry(content, name)
+    match = content.match(/(enum :source, \{)([^}]*)(\})/m)
+    return nil unless match
+
+    prefix, body, suffix = match[1], match[2], match[3]
+
+    trailing = body[/\s*\z/] || ""
+    core = body[0...(body.length - trailing.length)]
+    entry = "#{name}: \"#{name}\""
+
+    # A hash written with a trailing comma already supplies the separator, and an empty
+    # hash needs none at all. Emitting one regardless yields `redbark: "redbark",,` or
+    # `{, gocardless: "gocardless"}`: the same class of syntax error this method exists
+    # to prevent.
+    separator = (core.empty? || core.end_with?(",")) ? "" : ","
+
+    new_body =
+      if trailing.include?("\n")
+        # Multi-line: indent to match the last entry, not the closing brace.
+        indent = core[/\n([ \t]*)[^\n]*\z/, 1] || "    "
+        "#{core}#{separator}\n#{indent}#{entry}#{trailing}"
+      else
+        "#{core}#{separator} #{entry}#{trailing}"
+      end
+
+    # Block form: a string replacement would interpret any backslash sequence in the
+    # captured hash body as a backreference.
+    content.sub(/(enum :source, \{)([^}]*)(\})/m) { prefix + new_body + suffix }
+  end
+
+  # Appends a panel to Settings::ProvidersController::FAMILY_PANELS.
+  def self.append_family_panel_entry(content, key:, title:)
+    append_last_entry(content, /(FAMILY_PANELS = \[\n)(.*?)(\n[ \t]*\]\.freeze)/m,
+                      %({ key: "#{key}", title: "#{title}", turbo_id: "#{key}", partial: "#{key}_panel" }))
+  end
+
+  # Maps the panel key to its item model in PANEL_SYNCABLE_TYPES, which the row's sync
+  # status and Settings::ProvidersController#sync read.
+  def self.append_panel_syncable_type(content, key:, class_name:)
+    append_hash_entry(content, /(PANEL_SYNCABLE_TYPES = \{\n)(.*?)(\n[ \t]*\}\.freeze)/m, key, %("#{class_name}Item"))
+  end
+
+  # Hands the loaded items to the row's sync status through family_panel_items.
+  def self.append_family_panel_item(content, key:)
+    append_hash_entry(content, /(def family_panel_items\n[ \t]*\{\n)(.*?)(\n[ \t]*\}\n)/m, key, "@#{key}_items")
+  end
+
+  # Adds a `when "<key>"` branch to SettingsHelper#provider_summary, just before the
+  # `else` that leaves unknown keys under Available.
+  def self.append_provider_summary_case(content, key:)
+    pattern = /(def provider_summary\b.*?\n)([ \t]*)(else\n[ \t]*\{ status: :off \}\n)/m
+    match = content.match(pattern)
+    return nil unless match
+
+    indent = match[2]
+    branch = <<~RUBY.gsub(/^/, indent)
+      when "#{key}"
+        return { status: :off } unless @#{key}_items&.any?
+        sync_based_summary(key)
+    RUBY
+
+    content.sub(pattern) { match[1] + branch + indent + match[3] }
+  end
+
+  # Appends `"key" => value` to a multi-line hash, lining its arrow up with the last entry's.
+  def self.append_hash_entry(content, pattern, key, value)
+    last = content[pattern, 2]&.rstrip&.lines&.last
+    return nil unless last&.include?("=>")
+
+    width = last.index("=>") - last[/\A[ \t]*/].length
+    append_last_entry(content, pattern, %("#{key}").ljust(width - 1) + " => #{value}")
+  end
+
+  # Appends `entry` to the multi-line literal whose (opening)(body)(closing) `pattern`
+  # captures, indented like the last entry, which has no trailing comma and gets one.
+  def self.append_last_entry(content, pattern, entry)
+    match = content.match(pattern)
+    return nil unless match
+
+    body = match[2].rstrip
+    indent = body.lines.last[/\A[ \t]*/]
+    separator = body.end_with?(",") ? "" : ","
+
+    content.sub(pattern) { match[1] + "#{body}#{separator}\n#{indent}#{entry}" + match[3] }
+  end
+
   private
+
+    # Writes the block's result to `path` unless `marker` shows the entry is already there.
+    def add_bank_sync_entry(path, name, marker)
+      return unless File.exist?(path)
+
+      content = File.read(path)
+
+      if content.include?(marker)
+        say "#{name} already lists #{file_name}", :skip
+      elsif (updated = yield(content))
+        write_file(path, updated)
+        say "Added #{file_name} to #{name}", :green
+      else
+        say "Could not find #{name} in #{path}", :yellow
+      end
+    end
 
     def update_source_enum(model_path)
       return unless File.exist?(model_path)
@@ -627,15 +712,10 @@ class Provider::FamilyGenerator < Rails::Generators::NamedBase
         return
       end
 
-      # Find the enum :source line and add the new provider
-      # Pattern: enum :source, { key: "value", ... }
-      if content =~ /(enum :source, \{[^}]+)(})/
-        # Insert the new provider before the closing brace
-        updated_content = content.sub(
-          /(enum :source, \{[^}]+)(})/,
-          "\\1, #{file_name}: \"#{file_name}\"\\2"
-        )
-        write_file(model_path, updated_content)
+      updated = self.class.append_source_enum_entry(content, file_name)
+
+      if updated
+        write_file(model_path, updated)
         say "Added #{file_name} to #{model_name} source enum", :green
       else
         say "Could not find source enum in #{model_name}", :yellow
@@ -810,6 +890,7 @@ class Provider::FamilyGenerator < Rails::Generators::NamedBase
     def investment_provider?
       options[:type] == "investment"
     end
+
 
     def parsed_fields
       @parsed_fields ||= fields.map do |field_def|

@@ -16,6 +16,7 @@ ru:
       edit: Редактировать категорию
     form:
       auto_adjust: авто-настройка.
+      trigger_label: Выбрать цвет и иконку
       color: Цвет
       icon: Иконка
       name_label: Название
@@ -69,5 +70,5 @@ ru:
         empty: Категории не найдены
         expense: расход
         income: доход
-        match_transfer: Соответствие переводу/платежу
+        match_transfer: Сопоставить с переводом/платежом
         one_time: Одноразовый %{type}
