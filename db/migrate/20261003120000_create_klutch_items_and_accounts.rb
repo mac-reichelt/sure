@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-class CreateKlutchItemsAndAccounts < ActiveRecord::Migration[7.2]
+class CreateKlutchItemsAndAccounts < ActiveRecord::Migration[8.1]
   def change
     # Create provider items table (stores per-family connection credentials)
     create_table :klutch_items, id: :uuid do |t|
