@@ -82,17 +82,12 @@ class KlutchItemsControllerTest < ActionDispatch::IntegrationTest
     assert_select "body turbo-frame#modal h2", text: "Select Klutch Accounts"
   end
 
-  test "other modal linking actions without credentials render setup instructions" do
-    [
-      [ :get, preload_accounts_klutch_items_url, {} ],
-      [ :get, select_existing_account_klutch_items_url, { account_id: accounts(:credit_card).id } ],
-      [ :post, link_accounts_klutch_items_url, {} ],
-      [ :post, link_existing_account_klutch_items_url, { account_id: accounts(:credit_card).id } ]
-    ].each do |method, url, params|
-      public_send(method, url, params: params, headers: { "Turbo-Frame" => "modal" })
+  test "select existing account without credentials renders setup instructions in the modal" do
+    get select_existing_account_klutch_items_url,
+        params: { account_id: accounts(:credit_card).id },
+        headers: { "Turbo-Frame" => "modal" }
 
-      assert_response :success
-      assert_select "turbo-frame#modal h2", text: "Klutch Setup Required"
-    end
+    assert_response :success
+    assert_select "turbo-frame#modal h2", text: "Klutch Setup Required"
   end
 end

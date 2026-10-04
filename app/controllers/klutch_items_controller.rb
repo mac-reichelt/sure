@@ -106,11 +106,7 @@ class KlutchItemsController < ApplicationController
   def preload_accounts
     klutch_item = Current.family.klutch_items.first
     unless klutch_item&.credentials_configured?
-      if turbo_frame_request?
-        render partial: "klutch_items/setup_required", layout: false
-      else
-        redirect_to settings_providers_path, alert: t(".no_credentials_configured")
-      end
+      redirect_to settings_providers_path, alert: t(".no_credentials_configured")
       return
     end
 
@@ -124,11 +120,7 @@ class KlutchItemsController < ApplicationController
 
     klutch_item = Current.family.klutch_items.first
     unless klutch_item&.credentials_configured?
-      if turbo_frame_request?
-        render partial: "klutch_items/setup_required", layout: false
-      else
-        redirect_to settings_providers_path, alert: t(".no_credentials_configured")
-      end
+      render_or_redirect_setup_required
       return
     end
 
@@ -143,11 +135,7 @@ class KlutchItemsController < ApplicationController
   def link_accounts
     klutch_item = Current.family.klutch_items.first
     unless klutch_item&.credentials_configured?
-      if turbo_frame_request?
-        render partial: "klutch_items/setup_required", layout: false
-      else
-        redirect_to settings_providers_path, alert: t(".no_api_key")
-      end
+      redirect_to settings_providers_path, alert: t(".no_api_key")
       return
     end
 
@@ -183,11 +171,7 @@ class KlutchItemsController < ApplicationController
     @klutch_item = Current.family.klutch_items.first
 
     unless @klutch_item&.credentials_configured?
-      if turbo_frame_request?
-        render partial: "klutch_items/setup_required", layout: false
-      else
-        redirect_to settings_providers_path, alert: t(".no_credentials_configured")
-      end
+      render_or_redirect_setup_required
       return
     end
 
@@ -202,11 +186,7 @@ class KlutchItemsController < ApplicationController
     klutch_item = Current.family.klutch_items.first
 
     unless klutch_item&.credentials_configured?
-      if turbo_frame_request?
-        render partial: "klutch_items/setup_required", layout: false
-      else
-        redirect_to settings_providers_path, alert: t(".no_api_key")
-      end
+      redirect_to settings_providers_path, alert: t(".no_api_key")
       return
     end
 
@@ -269,6 +249,14 @@ class KlutchItemsController < ApplicationController
   end
 
   private
+
+    def render_or_redirect_setup_required
+      if turbo_frame_request?
+        render partial: "klutch_items/setup_required", layout: false
+      else
+        redirect_to settings_providers_path, alert: t(".no_credentials_configured")
+      end
+    end
 
     def set_klutch_item
       @klutch_item = Current.family.klutch_items.find(params[:id])
