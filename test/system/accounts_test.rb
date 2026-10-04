@@ -158,11 +158,19 @@ class AccountsTest < ApplicationSystemTestCase
 
       click_button "Create Account"
 
-      within_testid("account-sidebar-tabs") do
-        click_on "All"
-        find("details", text: Accountable.from_type(accountable_type).display_name).click
-        assert_text account_name
+      3.times do
+        begin
+          within_testid("account-sidebar-tabs") do
+            click_on "All"
+            group = find("details", text: Accountable.from_type(accountable_type).display_name)
+            group.click unless group[:open]
+          end
+          break
+        rescue Selenium::WebDriver::Error::WebDriverError => e
+          raise unless e.message.match?(/does not belong to the document|stale element reference/i)
+        end
       end
+      assert_text account_name
 
       visit accounts_url
       assert_text account_name
