@@ -65,8 +65,11 @@ class KlutchItem::Importer
     def import_accounts(credentials)
       Rails.logger.info "KlutchItem::Importer - Fetching cards and account"
 
-      cards = klutch_provider.list_cards
-      stats["api_requests"] = stats.fetch("api_requests", 0) + 1
+      cards = begin
+        klutch_provider.list_cards
+      ensure
+        stats["api_requests"] = stats.fetch("api_requests", 0) + 1
+      end
       account_info = begin
         klutch_provider.get_account
       rescue Provider::Klutch::AuthenticationError => e

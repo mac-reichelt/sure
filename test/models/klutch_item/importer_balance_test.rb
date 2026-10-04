@@ -103,4 +103,18 @@ class KlutchItem::ImporterBalanceTest < ActiveSupport::TestCase
     assert_equal [ @klutch_account.id ], @item.klutch_accounts.pluck(:id)
     assert_equal accounts(:credit_card), @klutch_account.account_provider.reload.account
   end
+
+  test "counts each API request once during a normal import" do
+    @provider.expects(:list_cards).once.returns([])
+    @provider.expects(:get_account).once.returns(id: @klutch_account.klutch_account_id)
+    @provider.expects(:get_transactions).once.returns([])
+    @provider.expects(:get_balance).once.returns(
+      balance: BigDecimal("250.00"),
+      limit: BigDecimal("1000.00")
+    )
+
+    @importer.import
+
+    assert_equal 4, @item.reload.raw_payload.with_indifferent_access["api_requests"]
+  end
 end
