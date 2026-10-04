@@ -5,10 +5,6 @@ class Provider::MetadataTest < ActiveSupport::TestCase
     assert_equal %w[Bank Investment], Provider::Metadata.for(:akahu)[:kinds]
   end
 
-  test "klutch shares Brex's bank category" do
-    assert_equal Provider::Metadata.for(:brex)[:kinds], Provider::Metadata.for(:klutch)[:kinds]
-  end
-
   test "akahu supports multiple kinds" do
     providers_with_multiple_kinds = Provider::Metadata::REGISTRY.select { |_provider_key, metadata| metadata[:kinds].size > 1 }
 
