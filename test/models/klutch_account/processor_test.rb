@@ -43,6 +43,15 @@ class KlutchAccount::ProcessorTest < ActiveSupport::TestCase
     assert_in_delta 400.0, account.reload.accountable.available_credit, 0.01
   end
 
+  test "floors available credit at zero when amount owed exceeds the limit" do
+    account = accounts(:credit_card)
+    klutch_account = create_klutch_account("kl_over_limit", account: account, balance: 1200.0, credit_limit: 1000.0)
+
+    KlutchAccount::Processor.new(klutch_account).process
+
+    assert_equal 0, account.reload.accountable.available_credit
+  end
+
   # ---------------------------------------------------------------------------
   # no linked account
   # ---------------------------------------------------------------------------

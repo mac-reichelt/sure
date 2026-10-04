@@ -67,7 +67,7 @@ class KlutchAccount::Processor
       return unless limit&.positive?
 
       Account::ProviderImportAdapter.new(account).update_accountable_attributes(
-        attributes: { available_credit: limit - amount_owed },
+        attributes: { available_credit: [ limit - amount_owed, 0 ].max },
         source: "klutch"
       )
     end
