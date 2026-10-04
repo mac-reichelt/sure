@@ -137,7 +137,7 @@ class KlutchItemsController < ApplicationController
                                   .where(account_providers: { id: nil })
                                   .order(:name)
 
-    render layout: false
+    render layout: false if turbo_frame_request?
   end
 
   def link_accounts

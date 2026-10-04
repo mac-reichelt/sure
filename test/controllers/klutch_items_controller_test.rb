@@ -69,6 +69,19 @@ class KlutchItemsControllerTest < ActionDispatch::IntegrationTest
     refute_includes response.body, "javascript:alert(1)"
   end
 
+  test "select accounts with credentials keeps the layout for normal requests" do
+    ensure_tailwind_build
+    @user.family.klutch_items.create!(
+      name: "Klutch", client_id: "test_client_id", secret_key: "test_secret_key"
+    )
+
+    get select_accounts_klutch_items_url
+
+    assert_response :success
+    assert_includes response.body, "<html"
+    assert_select "body turbo-frame#modal h2", text: "Select Klutch Accounts"
+  end
+
   test "other modal linking actions without credentials render setup instructions" do
     [
       [ :get, preload_accounts_klutch_items_url, {} ],
