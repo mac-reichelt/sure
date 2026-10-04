@@ -206,11 +206,9 @@ class KlutchItem::Importer
       revolving_loan = revolving_loan.with_indifferent_access if revolving_loan.respond_to?(:with_indifferent_access)
 
       if revolving_loan && revolving_loan[:balance]
-        # A revolving-loan balance is a liability; normalize its sign because
-        # Klutch's public samples do not document the API's sign convention.
-        # KlutchAccount::Processor expects negative = owed internally.
+        # Klutch reports the amount owed as a positive number.
         klutch_account.update!(
-          current_balance: -revolving_loan[:balance].abs,
+          current_balance: revolving_loan[:balance].abs,
           credit_limit: revolving_loan[:limit]
         )
         return
@@ -233,8 +231,7 @@ class KlutchItem::Importer
     end
 
     # Fallback balance derivation: sum SETTLED transactions. Klutch returns
-    # charges as negative amounts, so a card with money owed sums negative;
-    # KlutchAccount::Processor negates it for the CreditCard display balance.
+    # charges as negative amounts, so negate their net sum to get amount owed.
     def derive_balance_from_transactions(klutch_account, fallback_reason:)
       start_date = balance_window_start(klutch_account)
 
@@ -249,7 +246,7 @@ class KlutchItem::Importer
 
       return if balance.nil?
 
-      klutch_account.update!(current_balance: balance)
+      klutch_account.update!(current_balance: -balance)
       log_balance_fallback(klutch_account, fallback_reason:)
     end
 

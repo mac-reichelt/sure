@@ -22,7 +22,7 @@ class KlutchItem::ImporterBalanceTest < ActiveSupport::TestCase
     @importer = KlutchItem::Importer.new(@item, klutch_provider: @provider)
   end
 
-  test "stores a reported balance and credit limit using the liability sign convention" do
+  test "stores the positive amount owed and credit limit reported by Klutch" do
     @provider.expects(:get_balance).returns(
       balance: BigDecimal("250.00"),
       limit: BigDecimal("1000.00")
@@ -33,11 +33,11 @@ class KlutchItem::ImporterBalanceTest < ActiveSupport::TestCase
       @importer.send(:update_balance, @klutch_account)
     end
 
-    assert_equal BigDecimal("-250.00"), @klutch_account.reload.current_balance
+    assert_equal BigDecimal("250.00"), @klutch_account.reload.current_balance
     assert_equal BigDecimal("1000.00"), @klutch_account.credit_limit
   end
 
-  test "normalizes a negative upstream balance to the same liability convention" do
+  test "normalizes a negative upstream balance to positive amount owed" do
     @provider.expects(:get_balance).returns(
       balance: BigDecimal("-250.00"),
       limit: BigDecimal("1000.00")
@@ -45,7 +45,7 @@ class KlutchItem::ImporterBalanceTest < ActiveSupport::TestCase
 
     @importer.send(:update_balance, @klutch_account)
 
-    assert_equal BigDecimal("-250.00"), @klutch_account.reload.current_balance
+    assert_equal BigDecimal("250.00"), @klutch_account.reload.current_balance
     assert_equal BigDecimal("1000.00"), @klutch_account.credit_limit
   end
 
@@ -57,7 +57,7 @@ class KlutchItem::ImporterBalanceTest < ActiveSupport::TestCase
       @importer.send(:update_balance, @klutch_account)
     end
 
-    assert_equal BigDecimal("-125.00"), @klutch_account.reload.current_balance
+    assert_equal BigDecimal("125.00"), @klutch_account.reload.current_balance
     fallback_log = DebugLogEntry.order(:created_at).last
     assert_equal "warn", fallback_log.level
     assert_equal "klutch", fallback_log.provider_key
@@ -79,7 +79,7 @@ class KlutchItem::ImporterBalanceTest < ActiveSupport::TestCase
       assert_nothing_raised { @importer.send(:update_balance, @klutch_account) }
     end
 
-    assert_equal BigDecimal("-300.00"), @klutch_account.reload.current_balance
+    assert_equal BigDecimal("300.00"), @klutch_account.reload.current_balance
     logs = DebugLogEntry.where(provider_key: "klutch").order(:created_at).to_a
     failure_log = logs.find { |entry| entry.metadata["error_class"] }
     fallback_log = logs.find { |entry| entry.metadata["balance_source"] }

@@ -66,9 +66,8 @@ class Provider::Klutch
   #
   # Klutch/AlloyCard model the card as a revolving loan, exposing the current
   # amount owed via `account.revolvingLoan.balance` and the credit limit via
-  # `account.revolvingLoan.limit`. Klutch's public samples do not specify the
-  # revolving-loan balance sign, so the importer normalizes its magnitude before
-  # storing it using Sure's liability convention.
+  # `account.revolvingLoan.limit`. The live API returns both values as positive
+  # numbers, with `balance` representing the amount owed.
   #
   # Returns { balance: BigDecimal|nil, limit: BigDecimal|nil }, or nil when the
   # revolving-loan field is unavailable (e.g. an older schema or an account with

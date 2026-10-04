@@ -14,25 +14,33 @@ class KlutchAccount::ProcessorTest < ActiveSupport::TestCase
   # balance sign convention
   # ---------------------------------------------------------------------------
 
-  test "converts Klutch negative settled sum into positive amount owed for credit cards" do
+  test "stores Klutch positive amount owed as the credit card balance and anchor" do
     account = accounts(:credit_card)
-    klutch_account = create_klutch_account("kl_cc", account: account, balance: -250.0)
+    klutch_account = create_klutch_account("kl_cc", account: account, balance: 250.0)
 
     KlutchAccount::Processor.new(klutch_account).process
 
-    # Klutch reports settled charges as a negative sum (-250 => $250 spent);
-    # Sure stores credit-card debt as a positive balance.
     assert_in_delta 250.0, account.reload.cash_balance, 0.01
+    assert_in_delta 250.0, account.current_anchor_balance, 0.01
   end
 
-  test "sets available credit from the Klutch credit limit for credit cards" do
+  test "sets available credit to the positive limit less the amount owed" do
     account = accounts(:credit_card)
-    klutch_account = create_klutch_account("kl_limit", account: account, balance: -250.0, credit_limit: 1000.0)
+    klutch_account = create_klutch_account("kl_limit", account: account, balance: 250.0, credit_limit: 1000.0)
 
     KlutchAccount::Processor.new(klutch_account).process
 
-    # $250 owed against a $1,000 limit leaves $750 of available credit.
     assert_in_delta 750.0, account.reload.accountable.available_credit, 0.01
+  end
+
+  test "does not update available credit when the limit is not positive" do
+    account = accounts(:credit_card)
+    account.accountable.update!(available_credit: 400)
+    klutch_account = create_klutch_account("kl_limit", account: account, balance: 250.0, credit_limit: 0)
+
+    KlutchAccount::Processor.new(klutch_account).process
+
+    assert_in_delta 400.0, account.reload.accountable.available_credit, 0.01
   end
 
   # ---------------------------------------------------------------------------

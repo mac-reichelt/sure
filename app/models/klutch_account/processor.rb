@@ -39,17 +39,8 @@ class KlutchAccount::Processor
   private
 
     def update_account_balance(account)
-      # current_balance uses the internal cash-flow convention (negative = money
-      # owed on the card). It comes from the revolving-loan balance when Klutch
-      # exposes it, otherwise from the sum of settled transactions.
-      balance = klutch_account.current_balance || 0
-
-      # Banking sign convention:
-      # - CreditCard and Loan accounts store a positive "amount owed".
-      # Klutch reports money owed as negative, so we negate it.
-      if account.accountable_type == "CreditCard" || account.accountable_type == "Loan"
-        balance = -balance
-      end
+      # Klutch balances are positive amounts owed; use abs as a safeguard.
+      balance = klutch_account.current_balance&.abs || 0
 
       Rails.logger.info "KlutchAccount::Processor - Balance update: #{balance}"
 
@@ -73,7 +64,7 @@ class KlutchAccount::Processor
       return unless account.accountable_type == "CreditCard"
 
       limit = klutch_account.credit_limit
-      return if limit.blank?
+      return unless limit&.positive?
 
       Account::ProviderImportAdapter.new(account).update_accountable_attributes(
         attributes: { available_credit: limit - amount_owed },
