@@ -42,6 +42,17 @@ en:
       loading_message: "Loading Klutch accounts..."
       loading_title: "Loading"
 
+    setup_required:
+      title: "Klutch Setup Required"
+      credentials_not_configured: "Credentials Not Configured"
+      credentials_description: "Before you can link Klutch accounts, you need to configure your Klutch client ID and secret key."
+      setup_steps_title: "Setup Steps:"
+      setup_step_1_html: "Go to <strong>Settings → Providers</strong>"
+      setup_step_2_html: "Find the <strong>Klutch</strong> section"
+      setup_step_3: "Enter your Klutch client ID and secret key"
+      setup_step_4: "Return here to link your accounts"
+      go_to_provider_settings: "Go to Provider Settings"
+
     # Account linking
     link_accounts:
       all_already_linked:

@@ -116,11 +116,11 @@ class KlutchItemsController < ApplicationController
 
   def select_accounts
     @accountable_type = params[:accountable_type]
-    @return_to = params[:return_to]
+    @return_to = url_from(params[:return_to])
 
     klutch_item = Current.family.klutch_items.first
     unless klutch_item&.credentials_configured?
-      redirect_to settings_providers_path, alert: t(".no_credentials_configured")
+      render_or_redirect_setup_required
       return
     end
 
@@ -128,6 +128,8 @@ class KlutchItemsController < ApplicationController
                                   .left_joins(:account_provider)
                                   .where(account_providers: { id: nil })
                                   .order(:name)
+
+    render layout: false if turbo_frame_request?
   end
 
   def link_accounts
@@ -169,7 +171,7 @@ class KlutchItemsController < ApplicationController
     @klutch_item = Current.family.klutch_items.first
 
     unless @klutch_item&.credentials_configured?
-      redirect_to settings_providers_path, alert: t(".no_credentials_configured")
+      render_or_redirect_setup_required
       return
     end
 
@@ -247,6 +249,14 @@ class KlutchItemsController < ApplicationController
   end
 
   private
+
+    def render_or_redirect_setup_required
+      if turbo_frame_request?
+        render partial: "klutch_items/setup_required", layout: false
+      else
+        redirect_to settings_providers_path, alert: t(".no_credentials_configured")
+      end
+    end
 
     def set_klutch_item
       @klutch_item = Current.family.klutch_items.find(params[:id])
