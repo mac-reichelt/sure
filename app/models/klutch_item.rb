@@ -18,6 +18,8 @@ class KlutchItem < ApplicationRecord
   if encryption_ready?
     encrypts :client_id, deterministic: true
     encrypts :secret_key, deterministic: true
+    encrypts :raw_payload
+    encrypts :raw_institution_payload
   end
 
   validates :name, presence: true

@@ -55,11 +55,6 @@ class Provider::Klutch
   def get_account
     data = execute(ACCOUNT_QUERY, operation_name: "get_account")
     data[:account]
-  rescue Error => e
-    # `account` field shape is not fully confirmed; treat failures as "no data"
-    # rather than aborting the whole sync.
-    Rails.logger.warn "Provider::Klutch - get_account failed: #{e.message}"
-    nil
   end
 
   # Fetch the account's outstanding balance and credit limit.

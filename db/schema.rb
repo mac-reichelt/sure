@@ -1613,7 +1613,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_03_120000) do
     t.date "sync_start_date"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
-    t.index ["klutch_account_id"], name: "index_klutch_accounts_on_klutch_account_id", unique: true
+    t.index ["klutch_item_id", "klutch_account_id"], name: "index_klutch_accounts_on_item_and_account_id", unique: true
     t.index ["klutch_item_id"], name: "index_klutch_accounts_on_klutch_item_id"
   end
 

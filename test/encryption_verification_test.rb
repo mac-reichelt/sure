@@ -353,6 +353,41 @@ class EncryptionVerificationTest < ActiveSupport::TestCase
     assert_column_not_plaintext(MonobankAccount, account.id, :raw_transactions_payload, "tx_probe")
   end
 
+  test "klutch item and account payloads are encrypted" do
+    skip "Klutch encryption not configured" unless KlutchItem.encryption_ready?
+
+    item = KlutchItem.create!(
+      family: families(:dylan_family),
+      name: "Encrypted Klutch",
+      client_id: "klutch-client",
+      secret_key: "klutch-secret"
+    )
+    item.update!(
+      raw_payload: { "item_probe" => "klutch-item-raw" },
+      raw_institution_payload: { "institution_probe" => "klutch-institution-raw" }
+    )
+    item.reload
+
+    assert_equal({ "item_probe" => "klutch-item-raw" }, item.raw_payload)
+    assert_equal({ "institution_probe" => "klutch-institution-raw" }, item.raw_institution_payload)
+    assert_column_not_plaintext(KlutchItem, item.id, :raw_payload, "klutch-item-raw")
+    assert_column_not_plaintext(KlutchItem, item.id, :raw_institution_payload, "klutch-institution-raw")
+
+    account = item.klutch_accounts.create!(
+      name: "Klutch Card",
+      klutch_account_id: "encrypted-klutch-account",
+      currency: "USD",
+      raw_payload: { "account_probe" => "klutch-account-raw" },
+      raw_transactions_payload: [ { "id" => "klutch-transaction-raw" } ]
+    )
+    account.reload
+
+    assert_equal({ "account_probe" => "klutch-account-raw" }, account.raw_payload)
+    assert_equal [ { "id" => "klutch-transaction-raw" } ], account.raw_transactions_payload
+    assert_column_not_plaintext(KlutchAccount, account.id, :raw_payload, "klutch-account-raw")
+    assert_column_not_plaintext(KlutchAccount, account.id, :raw_transactions_payload, "klutch-transaction-raw")
+  end
+
   # ============================================================================
   # DATABASE VERIFICATION TESTS
   # ============================================================================

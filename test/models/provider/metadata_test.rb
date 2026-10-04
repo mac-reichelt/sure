@@ -5,8 +5,8 @@ class Provider::MetadataTest < ActiveSupport::TestCase
     assert_equal %w[Bank Investment], Provider::Metadata.for(:akahu)[:kinds]
   end
 
-  test "klutch is categorized as a banking provider" do
-    assert_equal %w[Bank], Provider::Metadata.for(:klutch)[:kinds]
+  test "klutch shares Brex's bank category" do
+    assert_equal Provider::Metadata.for(:brex)[:kinds], Provider::Metadata.for(:klutch)[:kinds]
   end
 
   test "akahu supports multiple kinds" do

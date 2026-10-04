@@ -66,9 +66,29 @@ class KlutchItem::Importer
       Rails.logger.info "KlutchItem::Importer - Fetching cards and account"
 
       cards = klutch_provider.list_cards
-      account_info = klutch_provider.get_account
+      stats["api_requests"] = stats.fetch("api_requests", 0) + 1
+      account_info = begin
+        klutch_provider.get_account
+      rescue Provider::Klutch::AuthenticationError => e
+        log_account_fetch_failure(e)
+        raise
+      rescue StandardError => e
+        log_account_fetch_failure(e)
+        return
+      ensure
+        stats["api_requests"] = stats.fetch("api_requests", 0) + 1
+      end
 
-      stats["api_requests"] = stats.fetch("api_requests", 0) + 2
+      unless account_info.present?
+        log_account_fetch_failure(reason: "Klutch returned no account data")
+        return
+      end
+
+      account_info = account_info.with_indifferent_access if account_info.respond_to?(:with_indifferent_access)
+      unless account_info[:id].present?
+        log_account_fetch_failure(reason: "Klutch account response did not include an id")
+        return
+      end
 
       if Rails.configuration.x.klutch.debug_raw
         Rails.logger.debug "Klutch raw cards: #{cards.to_json}"
@@ -103,9 +123,7 @@ class KlutchItem::Importer
       cards = Array(cards).map { |c| c.is_a?(Hash) ? c.with_indifferent_access : c }
       primary_card = cards.first || {}
 
-      # Stable identifier: prefer the AlloyCard account id, fall back to a
-      # deterministic per-item id so repeated syncs upsert the same record.
-      account_id = account_info[:id].presence || "klutch_account_#{klutch_item.id}"
+      account_id = account_info[:id]
 
       last_four = primary_card[:lastFour].presence
       name = last_four ? "Klutch Card ••#{last_four}" : "Klutch Card"
@@ -354,6 +372,28 @@ class KlutchItem::Importer
         Rails.logger.info "KlutchItem::Importer - Pruning #{removed.count} removed accounts"
         removed.destroy_all
       end
+    end
+
+    def log_account_fetch_failure(error = nil, reason: nil)
+      detail = error ? "#{error.class}: #{error.message}" : reason
+      message = "Klutch account fetch failed for item #{klutch_item.id}: #{detail}; " \
+        "skipping account import and pruning"
+
+      DebugLogEntry.capture(
+        category: "provider_sync",
+        level: "warn",
+        message: message,
+        source: self.class.name,
+        provider_key: "klutch",
+        family: klutch_item.family,
+        metadata: {
+          klutch_item_id: klutch_item.id,
+          error_class: error&.class&.name,
+          error: error&.message,
+          reason: reason
+        }.compact
+      )
+      Rails.logger.warn(message)
     end
 
     def register_error(error, **context)

@@ -1,8 +1,13 @@
 # frozen_string_literal: true
 
 class KlutchAccount < ApplicationRecord
-  include CurrencyNormalizable
+  include CurrencyNormalizable, Encryptable
   include KlutchAccount::DataHelpers
+
+  if encryption_ready?
+    encrypts :raw_payload
+    encrypts :raw_transactions_payload
+  end
 
   belongs_to :klutch_item
 

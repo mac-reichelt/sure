@@ -30,14 +30,10 @@ class PropertiesEditTest < ApplicationSystemTestCase
     # racing the broadcast.
     def open_account_edit_dialog
       3.times do
-        # The subtype select briefly exists disabled while the edit form hydrates.
-        # Avoid reopening the menu when the modal is already loading.
-        if has_selector?("select#account_accountable_attributes_subtype", visible: true, wait: 0)
-          return if has_field?("account_accountable_attributes_subtype", wait: 2)
-          next
-        end
-
-        # A prior attempt may already have opened the edit form.
+        # A prior (slow) attempt may have already opened the edit form. Check
+        # the field is enabled, not just present — the select briefly exists
+        # but disabled while the form finishes hydrating, and assert_field's
+        # default matcher (used by the caller) excludes disabled fields.
         return if has_field?("account_accountable_attributes_subtype", wait: 0)
 
         begin

@@ -89,4 +89,18 @@ class KlutchItem::ImporterBalanceTest < ActiveSupport::TestCase
     assert_equal @klutch_account.account_provider.id, failure_log.account_provider_id
     assert_equal "settled_transactions", fallback_log.metadata["balance_source"]
   end
+
+  test "keeps linked account when fetching account information fails" do
+    @provider.expects(:list_cards).twice.returns([])
+    @provider.expects(:get_account).twice.returns(id: @klutch_account.klutch_account_id)
+      .then.raises(Provider::Klutch::Error.new("account endpoint unavailable", :server_error))
+
+    assert_difference "DebugLogEntry.count", 1 do
+      @importer.send(:import_accounts, @item.klutch_credentials)
+      @importer.send(:import_accounts, @item.klutch_credentials)
+    end
+
+    assert_equal [ @klutch_account.id ], @item.klutch_accounts.pluck(:id)
+    assert_equal accounts(:credit_card), @klutch_account.account_provider.reload.account
+  end
 end
