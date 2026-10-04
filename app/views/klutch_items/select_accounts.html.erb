@@ -1,0 +1,59 @@
+<%= turbo_frame_tag "modal" do %>
+  <%= render DS::Dialog.new(disable_frame: true) do |dialog| %>
+    <% dialog.with_header(title: t(".title")) %>
+
+    <% dialog.with_body do %>
+      <div class="space-y-4">
+        <p class="text-sm text-secondary">
+          <%= t(".description", product_name: product_name) %>
+        </p>
+
+        <form action="<%= link_accounts_klutch_items_path %>" method="post" class="space-y-4" data-turbo-frame="_top">
+          <%= hidden_field_tag :authenticity_token, form_authenticity_token %>
+          <%= hidden_field_tag :accountable_type, @accountable_type %>
+          <%= hidden_field_tag :return_to, @return_to %>
+
+          <% if @klutch_accounts.empty? %>
+            <%= render DS::Alert.new(message: t(".no_accounts_found"), variant: :info) %>
+          <% end %>
+
+          <div class="space-y-2">
+            <% @klutch_accounts.each do |account| %>
+              <% has_blank_name = account.name.blank? %>
+              <label class="flex items-start gap-3 p-3 border <%= has_blank_name ? "border-destructive bg-destructive/5" : "border-primary" %> rounded-lg <%= has_blank_name ? "cursor-not-allowed opacity-60" : "hover:bg-subtle cursor-pointer" %> transition-colors">
+                <%= check_box_tag "selected_account_ids[]", account.id, false, disabled: has_blank_name, id: "klutch_account_#{account.id}", class: "mt-1" %>
+                <div class="flex-1">
+                  <div class="font-medium text-sm <%= has_blank_name ? "text-destructive" : "text-primary" %>">
+                    <%= has_blank_name ? t(".no_name_placeholder") : account.name %>
+                  </div>
+                  <div class="text-xs text-secondary mt-1">
+                    <%= account.currency %> • <%= account.account_status %>
+                  </div>
+                  <% if has_blank_name %>
+                    <div class="text-xs text-destructive mt-1">
+                      <%= t(".configure_name_in_provider") %>
+                    </div>
+                  <% end %>
+                </div>
+              </label>
+            <% end %>
+          </div>
+
+          <div class="flex gap-2 justify-end pt-4">
+            <%= render DS::Link.new(
+              text: t(".cancel"),
+              href: @return_to || new_account_path,
+              variant: :secondary,
+              data: { turbo_frame: "_top", action: "DS--dialog#close" }
+            ) %>
+            <%= render DS::Button.new(
+              text: t(".link_accounts"),
+              variant: :primary,
+              type: :submit
+            ) %>
+          </div>
+        </form>
+      </div>
+    <% end %>
+  <% end %>
+<% end %>
