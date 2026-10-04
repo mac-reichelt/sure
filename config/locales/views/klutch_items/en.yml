@@ -27,37 +27,6 @@ en:
         needs_setup: "%{count} accounts need setup..."
       success: "Sync started"
 
-    # Panel (settings view)
-    panel:
-      setup_instructions: "Setup instructions:"
-      step_1: "Visit your Klutch dashboard to get your credentials"
-      step_2: "Enter your credentials below and click the Save button"
-      step_3: "After a successful connection, go to the Accounts tab to set up new accounts"
-      field_descriptions: "Field descriptions:"
-      optional: "(Optional)"
-      required: "(required)"
-      optional_with_default: "(optional, defaults to %{default_value})"
-      save_button: "Save Configuration"
-      update_button: "Update Configuration"
-      status_configured_html: "Configured and ready to use. Visit the <a href=\"%{accounts_path}\" class=\"link\">Accounts</a> tab to manage and set up accounts."
-      status_not_configured: "Not configured"
-      fields:
-        client_id:
-          label: "Client Id"
-          description: "Your Klutch client id"
-          placeholder_new: "Paste client id here"
-          placeholder_update: "Enter new client id to update"
-        secret_key:
-          label: "Secret Key"
-          description: "Your Klutch secret key"
-          placeholder_new: "Paste secret key here"
-          placeholder_update: "Enter new secret key to update"
-        base_url:
-          label: "Base Url"
-          description: "Your Klutch base url"
-          placeholder_new: "Paste base url here"
-          placeholder_update: "Enter new base url to update"
-
     # CRUD success messages
     create:
       success: "Klutch connection created successfully"

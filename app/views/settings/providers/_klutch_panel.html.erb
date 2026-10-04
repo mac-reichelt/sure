@@ -1,25 +1,14 @@
 <div id="klutch-providers-panel" class="space-y-4">
-  <div class="prose prose-sm text-secondary">
-    <p class="text-primary font-medium"><%= t("klutch_items.panel.setup_instructions") %></p>
-    <ol>
-      <li><%= t("klutch_items.panel.step_1") %></li>
-      <li><%= t("klutch_items.panel.step_2") %></li>
-      <li><%= t("klutch_items.panel.step_3") %></li>
-    </ol>
-
-    <p class="text-primary font-medium"><%= t("klutch_items.panel.field_descriptions") %></p>
-    <ul>
-      <li><strong><%= t("klutch_items.panel.fields.client_id.label") %>:</strong> <%= t("klutch_items.panel.fields.client_id.description") %> <%= t("klutch_items.panel.required") %></li>
-      <li><strong><%= t("klutch_items.panel.fields.secret_key.label") %>:</strong> <%= t("klutch_items.panel.fields.secret_key.description") %> <%= t("klutch_items.panel.required") %></li>
-      <li><strong><%= t("klutch_items.panel.fields.base_url.label") %>:</strong> <%= t("klutch_items.panel.fields.base_url.description") %> <%= t("klutch_items.panel.optional_with_default", default_value: "https://graphql.klutchcard.com/graphql") %></li>
-    </ul>
-  </div>
+  <%= render "settings/providers/setup_steps",
+             steps: [
+               t("settings.providers.klutch_panel.step_1"),
+               t("settings.providers.klutch_panel.step_2"),
+               t("settings.providers.klutch_panel.step_3")
+             ] %>
 
   <% error_msg = local_assigns[:error_message] || @error_message %>
   <% if error_msg.present? %>
-    <div class="p-2 rounded-md bg-destructive/10 text-destructive text-sm overflow-hidden">
-      <p class="line-clamp-3" title="<%= error_msg %>"><%= error_msg %></p>
-    </div>
+    <%= render DS::Alert.new(message: error_msg, variant: :error) %>
   <% end %>
 
   <%
@@ -34,34 +23,28 @@
                        data: { turbo: true },
                        class: "space-y-3" do |form| %>
     <%= form.text_field :client_id,
-                        label: t("klutch_items.panel.fields.client_id.label"),
-                        placeholder: is_new_record ? t("klutch_items.panel.fields.client_id.placeholder_new") : t("klutch_items.panel.fields.client_id.placeholder_update"),
+                        label: t("settings.providers.klutch_panel.client_id_label"),
+                        placeholder: is_new_record ?
+                          t("settings.providers.klutch_panel.client_id_placeholder_new") :
+                          t("settings.providers.klutch_panel.client_id_placeholder_update"),
                         type: :password %>
 
     <%= form.text_field :secret_key,
-                        label: t("klutch_items.panel.fields.secret_key.label"),
-                        placeholder: is_new_record ? t("klutch_items.panel.fields.secret_key.placeholder_new") : t("klutch_items.panel.fields.secret_key.placeholder_update"),
+                        label: t("settings.providers.klutch_panel.secret_key_label"),
+                        placeholder: is_new_record ?
+                          t("settings.providers.klutch_panel.secret_key_placeholder_new") :
+                          t("settings.providers.klutch_panel.secret_key_placeholder_update"),
                         type: :password %>
 
     <%= form.text_field :base_url,
-                        label: t("klutch_items.panel.fields.base_url.label") + " " + t("klutch_items.panel.optional"),
-                        placeholder: "https://graphql.klutchcard.com/graphql (default)",
+                        label: t("settings.providers.klutch_panel.base_url_label"),
+                        placeholder: t("settings.providers.klutch_panel.base_url_placeholder"),
                         value: klutch_item.base_url %>
 
     <div class="flex justify-end">
-      <%= form.submit is_new_record ? t("klutch_items.panel.save_button") : t("klutch_items.panel.update_button"),
-                      class: "inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-medium btn btn--primary" %>
+      <%= form.submit(
+        is_new_record ? t("settings.providers.klutch_panel.save_and_connect") : t("settings.providers.klutch_panel.update_connection")
+      ) %>
     </div>
   <% end %>
-
-  <% items = local_assigns[:klutch_items] || @klutch_items || Current.family.klutch_items.where.not(client_id: [nil, ""]) %>
-  <div class="flex items-center gap-2">
-    <% if items&.any? %>
-      <div class="w-2 h-2 bg-success rounded-full"></div>
-      <p class="text-sm text-secondary"><%= t("klutch_items.panel.status_configured_html", accounts_path: accounts_path).html_safe %></p>
-    <% else %>
-      <div class="w-2 h-2 bg-gray-400 rounded-full"></div>
-      <p class="text-sm text-secondary"><%= t("klutch_items.panel.status_not_configured") %></p>
-    <% end %>
-  </div>
 </div>
