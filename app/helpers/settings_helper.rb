@@ -130,6 +130,9 @@ module SettingsHelper
     when "questrade"
       return { status: :off } unless @questrade_items&.any?
       sync_based_summary(key)
+    when "klutch"
+      return { status: :off } unless @klutch_items&.any?
+      sync_based_summary(key)
     else
       { status: :off }
     end

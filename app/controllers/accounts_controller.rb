@@ -47,6 +47,7 @@ class AccountsController < ApplicationController
     @trade_republic_items = visible_provider_items(
       family.trade_republic_items.ordered.includes(trade_republic_accounts: { account_provider: :account })
     )
+    @klutch_items = visible_provider_items(family.klutch_items.ordered.with_attached_logo.includes(:klutch_accounts))
 
     # An on-chain item is admitted as soon as ONE of its accounts is accessible,
     # so the card is told which of them this viewer may actually see. nil is the
@@ -564,6 +565,13 @@ class AccountsController < ApplicationController
       @lunchflow_items.each do |item|
         latest_sync = item.latest_sync_record
         @lunchflow_sync_stats_map[item.id] = latest_sync&.sync_stats || {}
+      end
+
+      # Klutch sync stats
+      @klutch_sync_stats_map = {}
+      @klutch_items.each do |item|
+        latest_sync = item.syncs.ordered.first
+        @klutch_sync_stats_map[item.id] = latest_sync&.sync_stats || {}
       end
 
       # Akahu sync stats

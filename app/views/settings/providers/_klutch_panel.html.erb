@@ -1,0 +1,50 @@
+<div id="klutch-providers-panel" class="space-y-4">
+  <%= render "settings/providers/setup_steps",
+             steps: [
+               t("settings.providers.klutch_panel.step_1"),
+               t("settings.providers.klutch_panel.step_2"),
+               t("settings.providers.klutch_panel.step_3")
+             ] %>
+
+  <% error_msg = local_assigns[:error_message] || @error_message %>
+  <% if error_msg.present? %>
+    <%= render DS::Alert.new(message: error_msg, variant: :error) %>
+  <% end %>
+
+  <%
+    klutch_item = Current.family.klutch_items.first_or_initialize(name: "Klutch Connection")
+    is_new_record = klutch_item.new_record?
+  %>
+
+  <%= styled_form_with model: klutch_item,
+                       url: is_new_record ? klutch_items_path : klutch_item_path(klutch_item),
+                       scope: :klutch_item,
+                       method: is_new_record ? :post : :patch,
+                       data: { turbo: true },
+                       class: "space-y-3" do |form| %>
+    <%= form.text_field :client_id,
+                        label: t("settings.providers.klutch_panel.client_id_label"),
+                        placeholder: is_new_record ?
+                          t("settings.providers.klutch_panel.client_id_placeholder_new") :
+                          t("settings.providers.klutch_panel.client_id_placeholder_update"),
+                        type: :password %>
+
+    <%= form.text_field :secret_key,
+                        label: t("settings.providers.klutch_panel.secret_key_label"),
+                        placeholder: is_new_record ?
+                          t("settings.providers.klutch_panel.secret_key_placeholder_new") :
+                          t("settings.providers.klutch_panel.secret_key_placeholder_update"),
+                        type: :password %>
+
+    <%= form.text_field :base_url,
+                        label: t("settings.providers.klutch_panel.base_url_label"),
+                        placeholder: t("settings.providers.klutch_panel.base_url_placeholder"),
+                        value: klutch_item.base_url %>
+
+    <div class="flex justify-end">
+      <%= form.submit(
+        is_new_record ? t("settings.providers.klutch_panel.save_and_connect") : t("settings.providers.klutch_panel.update_connection")
+      ) %>
+    </div>
+  <% end %>
+</div>
