@@ -120,14 +120,17 @@ class KlutchAccount::Transactions::Processor
       amount = parse_decimal(data[:amount])
       return nil if amount.nil?
 
-      # Klutch (AlloyCard) returns charges as NEGATIVE amounts (e.g. -100.0 for a
-      # $100 purchase) and payments/refunds as positive.
-      # Sure convention: positive = money out (expense), negative = money in.
-      # So we negate: charge (-100) -> +100 expense; payment (+50) -> -50 inflow.
-      -amount
+      case data[:transactionType].to_s.upcase
+      when "CHARGE", "OTHER"
+        amount.abs
+      when "PAYMENT", "REFUND"
+        -amount.abs
+      end
     end
 
     def build_extra_metadata(data)
+      card = data[:card].to_h.with_indifferent_access
+
       {
         "klutch" => {
           "id" => data[:id],
@@ -136,9 +139,12 @@ class KlutchAccount::Transactions::Processor
           "type" => data[:transactionType],
           "merchant" => data[:merchantName],
           "category" => data.dig(:category, :name),
-          "decline_reason" => data[:declineReason],
-          "last_four" => data.dig(:card, :lastFour)
-        }.compact
+          "decline_reason" => data[:declineReason]
+        }.compact.merge(
+          "card_id" => card[:id],
+          "card_name" => card[:name],
+          "last_four" => card[:lastFour]
+        )
       }
     end
 end
