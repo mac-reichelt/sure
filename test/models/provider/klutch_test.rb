@@ -77,7 +77,7 @@ class Provider::KlutchTest < ActiveSupport::TestCase
     assert_equal Date.new(2026, 1, 31).to_time.utc.iso8601, filter["endDate"]
     assert_equal %w[SETTLED], filter["transactionStatus"]
     assert_equal %w[CHARGE], filter["transactionTypes"]
-    assert_equal "DESC", data_request[:body].dig("variables", "sortOrder")
+    assert_equal "UPDATED_DATE_DESC", data_request[:body].dig("variables", "sortOrder")
     assert_equal Provider::Klutch::TRANSACTION_PAGE_SIZE, data_request[:body].dig("variables", "limit")
     assert_nil data_request[:body].dig("variables", "nextCursor")
     assert_includes data_request[:body]["query"], "transactionsPaginated"
@@ -130,13 +130,44 @@ class Provider::KlutchTest < ActiveSupport::TestCase
     assert_equal "cursor-2", requests.third[:body].dig("variables", "nextCursor")
   end
 
-  test "stops transaction pagination when the page limit is reached" do
+  test "returns fetched transactions when the page limit is reached" do
+    page_limit = nil
     responses = [ token_response ] + Array.new(Provider::Klutch::MAX_TRANSACTION_PAGES) do |index|
       FakeResponse.new(
         code: 200, message: "OK",
-        body: { data: { transactionsPaginated: { list: [], nextCursor: "next-#{index}" } } }.to_json
+        body: {
+          data: {
+            transactionsPaginated: {
+              list: [ { id: "tx_#{index}", amount: "10", transactionType: "CHARGE" } ],
+              nextCursor: "next-#{index}"
+            }
+          }
+        }.to_json
       )
     end
+
+    Provider::Klutch.stub(:post, ->(_url, headers:, body:) { responses.shift }) do
+      client = Provider::Klutch.new(client_id: "client", secret_key: "secret")
+      transactions = client.get_transactions(
+        start_date: Date.new(2026, 1, 1),
+        on_page_limit: ->(page_count) { page_limit = page_count }
+      )
+
+      assert_equal Provider::Klutch::MAX_TRANSACTION_PAGES, transactions.size
+    end
+
+    assert_equal Provider::Klutch::MAX_TRANSACTION_PAGES, page_limit
+  end
+
+  test "raises when transaction pagination repeats a cursor" do
+    repeated_page = {
+      data: { transactionsPaginated: { list: [], nextCursor: "repeat" } }
+    }.to_json
+    responses = [
+      token_response,
+      FakeResponse.new(code: 200, message: "OK", body: repeated_page),
+      FakeResponse.new(code: 200, message: "OK", body: repeated_page)
+    ]
 
     Provider::Klutch.stub(:post, ->(_url, headers:, body:) { responses.shift }) do
       client = Provider::Klutch.new(client_id: "client", secret_key: "secret")
@@ -214,7 +245,7 @@ class Provider::KlutchTest < ActiveSupport::TestCase
       client = Provider::Klutch.new(client_id: "client", secret_key: "bad")
 
       assert_raises Provider::Klutch::AuthenticationError do
-        client.list_cards
+        client.get_balance
       end
     end
   end
@@ -226,7 +257,7 @@ class Provider::KlutchTest < ActiveSupport::TestCase
       client = Provider::Klutch.new(client_id: "client", secret_key: "secret")
 
       assert_raises Provider::Klutch::AuthenticationError do
-        client.list_cards
+        client.get_balance
       end
     end
   end

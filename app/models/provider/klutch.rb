@@ -43,13 +43,6 @@ class Provider::Klutch
     validate_configuration!
   end
 
-  # Fetch all cards on the account.
-  # Returns an array of hashes: [{ id:, name:, lastFour: }]
-  def list_cards
-    data = execute(CARDS_QUERY, operation_name: "list_cards")
-    normalize_list(data[:cards])
-  end
-
   # Fetch the account's outstanding balance and credit limit.
   #
   # Klutch/AlloyCard model the card as a revolving loan, exposing the current
@@ -76,7 +69,7 @@ class Provider::Klutch
   # statuses: array of transaction statuses (e.g. %w[SETTLED PENDING])
   # types:    array of transaction types (e.g. %w[CHARGE PAYMENT])
   # Returns an array of transaction hashes.
-  def get_transactions(start_date:, end_date: Date.current, statuses: nil, types: nil, on_page: nil)
+  def get_transactions(start_date:, end_date: Date.current, statuses: nil, types: nil, on_page: nil, on_page_limit: nil)
     filter = build_transaction_filter(start_date: start_date, end_date: end_date, statuses: statuses, types: types)
     transactions = []
     seen_cursors = Set.new
@@ -84,10 +77,6 @@ class Provider::Klutch
     page_count = 0
 
     loop do
-      if page_count >= MAX_TRANSACTION_PAGES
-        raise Error.new("Klutch transaction pagination exceeded #{MAX_TRANSACTION_PAGES} pages", :pagination_error)
-      end
-
       page_count += 1
       on_page&.call
 
@@ -95,7 +84,7 @@ class Provider::Klutch
         TRANSACTIONS_QUERY,
         variables: {
           filter: filter,
-          sortOrder: "DESC",
+          sortOrder: "UPDATED_DATE_DESC",
           limit: TRANSACTION_PAGE_SIZE,
           nextCursor: cursor
         },
@@ -109,6 +98,11 @@ class Provider::Klutch
 
       if seen_cursors.include?(next_cursor)
         raise Error.new("Klutch transaction pagination returned a repeated cursor", :pagination_error)
+      end
+
+      if page_count >= MAX_TRANSACTION_PAGES
+        on_page_limit&.call(page_count)
+        break
       end
 
       seen_cursors.add(next_cursor)
@@ -145,16 +139,6 @@ class Provider::Klutch
     CREATE_SESSION_TOKEN_MUTATION = <<~GRAPHQL
       mutation CreateSessionToken($clientId: String!, $secretKey: String!) {
         createSessionToken(clientId: $clientId, secretKey: $secretKey)
-      }
-    GRAPHQL
-
-    CARDS_QUERY = <<~GRAPHQL
-      query Cards {
-        cards {
-          id
-          name
-          lastFour
-        }
       }
     GRAPHQL
 

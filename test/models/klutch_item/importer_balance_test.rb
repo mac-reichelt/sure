@@ -51,7 +51,7 @@ class KlutchItem::ImporterBalanceTest < ActiveSupport::TestCase
 
   test "falls back and logs a warning when the reported balance is missing" do
     @provider.expects(:get_balance).returns(nil)
-    @provider.expects(:sum_transactions).returns(BigDecimal("-125.00"))
+    expect_fallback_sums(spending: "-125.00", credits: "0.00")
 
     assert_difference "DebugLogEntry.count", 1 do
       @importer.send(:update_balance, @klutch_account)
@@ -68,7 +68,7 @@ class KlutchItem::ImporterBalanceTest < ActiveSupport::TestCase
   test "logs a failed balance request and falls back without raising" do
     error = Provider::Klutch::Error.new("balance endpoint unavailable", :server_error)
     @provider.expects(:get_balance).raises(error)
-    @provider.expects(:sum_transactions).returns(BigDecimal("-300.00"))
+    expect_fallback_sums(spending: "-300.00", credits: "0.00")
     Rails.logger.expects(:warn).with do |message|
       message.include?(@klutch_account.id) &&
         message.include?("Provider::Klutch::Error") &&
@@ -90,30 +90,35 @@ class KlutchItem::ImporterBalanceTest < ActiveSupport::TestCase
     assert_equal "settled_transactions", fallback_log.metadata["balance_source"]
   end
 
+  test "derives fallback balance from transaction types regardless of sum signs" do
+    expect_fallback_sums(spending: "200.00", credits: "-75.00")
+
+    @importer.send(:derive_balance_from_transactions, @klutch_account, fallback_reason: "balance_response_unavailable")
+
+    assert_equal BigDecimal("125.00"), @klutch_account.reload.current_balance
+    assert_equal 2, @importer.send(:stats)["api_requests"]
+  end
+
   test "uses the same synthetic account id on repeated imports without pruning it" do
-    cards = [ { id: "card-1", name: "Virtual Card", lastFour: "4242" } ]
     @item.klutch_accounts.create!(
       name: "Stale account",
       klutch_account_id: "stale-account",
       currency: "USD"
     )
-    @provider.expects(:list_cards).twice.returns(cards)
-    @provider.expects(:get_account).never
-
     @importer.send(:import_accounts)
     @importer.send(:import_accounts)
 
     assert_equal [ KlutchAccount.card_account_id ], @item.klutch_accounts.pluck(:klutch_account_id)
     assert_equal KlutchAccount.card_account_id, @klutch_account.reload.klutch_account_id
+    assert_equal "Klutch Card", @klutch_account.name
+    assert_nil @klutch_account.institution_metadata["cards"]
     assert_equal accounts(:credit_card), @klutch_account.account_provider.reload.account
   end
 
-  test "counts the cards API request during account import" do
-    @provider.expects(:list_cards).once.returns([])
-
+  test "does not make an API request to import the shared account" do
     @importer.send(:import_accounts)
 
-    assert_equal 1, @importer.send(:stats)["api_requests"]
+    assert_equal 0, @importer.send(:stats).fetch("api_requests", 0)
   end
 
   test "counts every transaction page and requests all documented transaction types" do
@@ -127,4 +132,32 @@ class KlutchItem::ImporterBalanceTest < ActiveSupport::TestCase
 
     assert_equal 2, @importer.send(:stats)["api_requests"]
   end
+
+  test "logs a warning and item context when transaction pagination reaches its limit" do
+    @provider.expects(:get_transactions).with do |on_page_limit:, **|
+      on_page_limit.call(Provider::Klutch::MAX_TRANSACTION_PAGES)
+      true
+    end.returns([])
+
+    assert_difference "DebugLogEntry.count", 1 do
+      @importer.send(:import_transactions, @klutch_account)
+    end
+
+    warning = DebugLogEntry.order(:created_at).last
+    assert_equal "warn", warning.level
+    assert_equal "klutch", warning.provider_key
+    assert_equal @item.id, warning.metadata["klutch_item_id"]
+    assert_equal Provider::Klutch::MAX_TRANSACTION_PAGES, warning.metadata["page_count"]
+  end
+
+  private
+
+    def expect_fallback_sums(spending:, credits:)
+      @provider.expects(:sum_transactions).with do |types:, **|
+        types == %w[CHARGE OTHER]
+      end.returns(BigDecimal(spending))
+      @provider.expects(:sum_transactions).with do |types:, **|
+        types == %w[PAYMENT REFUND]
+      end.returns(BigDecimal(credits))
+    end
 end

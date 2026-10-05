@@ -27,7 +27,7 @@ class KlutchItem::Importer
       raise CredentialsError, "No Klutch credentials configured for item #{klutch_item.id}"
     end
 
-    # Step 1: Fetch and store the Klutch card account
+    # Step 1: Ensure the shared Klutch card account exists
     import_accounts
 
     # Step 2: For LINKED accounts only, fetch transactions + balance.
@@ -63,17 +63,10 @@ class KlutchItem::Importer
     end
 
     def import_accounts
-      Rails.logger.info "KlutchItem::Importer - Fetching cards"
-
-      cards = klutch_provider.list_cards
-      stats["api_requests"] = stats.fetch("api_requests", 0) + 1
-
-      if Rails.configuration.x.klutch.debug_raw
-        Rails.logger.debug "Klutch raw cards: #{cards.to_json}"
-      end
+      Rails.logger.info "KlutchItem::Importer - Importing the shared card account"
 
       # Klutch exposes one revolving loan shared by every card.
-      account_data = build_account_payload(cards)
+      account_data = build_account_payload
       stats["total_accounts"] = 1
 
       upstream_account_ids = [ account_data[:id].to_s ]
@@ -93,21 +86,14 @@ class KlutchItem::Importer
     end
 
     # Assemble the normalized revolving-loan account from card metadata.
-    def build_account_payload(cards)
-      cards = Array(cards).map { |c| c.is_a?(Hash) ? c.with_indifferent_access : c }
-      primary_card = cards.first || {}
-
-      last_four = primary_card[:lastFour].presence
-      name = last_four ? "Klutch Card ••#{last_four}" : "Klutch Card"
-
+    def build_account_payload
       {
         id: KlutchAccount.card_account_id,
-        name: name,
+        name: "Klutch Card",
         currency: "USD",
         account_type: "credit_card",
         provider: "klutch",
-        institution_name: "Klutch",
-        cards: cards
+        institution_name: "Klutch"
       }.with_indifferent_access
     end
 
@@ -147,7 +133,8 @@ class KlutchItem::Importer
           end_date: end_date,
           statuses: statuses,
           types: TRANSACTION_TYPES,
-          on_page: -> { stats["api_requests"] = stats.fetch("api_requests", 0) + 1 }
+          on_page: -> { stats["api_requests"] = stats.fetch("api_requests", 0) + 1 },
+          on_page_limit: ->(page_count) { log_transaction_page_limit(klutch_account, page_count) }
         )
 
         if Rails.configuration.x.klutch.debug_raw
@@ -221,19 +208,45 @@ class KlutchItem::Importer
     def derive_balance_from_transactions(klutch_account, fallback_reason:)
       start_date = balance_window_start(klutch_account)
 
-      balance = klutch_provider.sum_transactions(
+      charges = sum_transactions(start_date:, types: %w[CHARGE OTHER])
+      credits = sum_transactions(start_date:, types: %w[PAYMENT REFUND])
+      return if charges.nil? || credits.nil?
+
+      klutch_account.update!(current_balance: charges.abs - credits.abs)
+      log_balance_fallback(klutch_account, fallback_reason:)
+    end
+
+    def sum_transactions(start_date:, types:)
+      klutch_provider.sum_transactions(
         start_date: start_date,
         end_date: Date.current,
         statuses: [ SETTLED_STATUS ],
-        types: TRANSACTION_TYPES
+        types: types
       )
-
+    ensure
       stats["api_requests"] = stats.fetch("api_requests", 0) + 1
+    end
 
-      return if balance.nil?
+    def log_transaction_page_limit(klutch_account, page_count)
+      message = "Klutch transaction pagination reached #{page_count} pages for item #{klutch_item.id}; " \
+        "importing the fetched transactions"
 
-      klutch_account.update!(current_balance: -balance)
-      log_balance_fallback(klutch_account, fallback_reason:)
+      DebugLogEntry.capture(
+        category: "provider_sync",
+        level: "warn",
+        message: message,
+        source: self.class.name,
+        provider_key: "klutch",
+        family: klutch_item.family,
+        account: klutch_account.current_account,
+        account_provider: klutch_account.account_provider,
+        metadata: {
+          klutch_item_id: klutch_item.id,
+          klutch_account_id: klutch_account.id,
+          page_count: page_count
+        }
+      )
+      Rails.logger.warn(message)
     end
 
     def log_balance_fetch_failure(klutch_account, error)
