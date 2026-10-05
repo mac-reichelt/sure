@@ -7,13 +7,11 @@
 #      client_id + secret_key. This returns a short-lived JWT.
 #   2. Send that JWT as a Bearer token on subsequent queries.
 #
-# The root query type is `AlloyQuery`, exposing `cards`, `transactions`,
+# The root query type is `AlloyQuery`, exposing `cards`, `transactionsPaginated`,
 # `account`, and aggregate helpers like `sumTransactions`.
 #
 # NOTE: Klutch does not publish an official Ruby SDK and introspection is
-# disabled on their endpoint, so the queries below were reverse-engineered.
-# Queries were reverse-engineered and should be verified against a live
-# sandbox account before relying on them in production.
+# disabled on their endpoint.
 class Provider::Klutch
   include HTTParty
 
@@ -21,6 +19,8 @@ class Provider::Klutch
   default_options.merge!(verify: true, ssl_verify_mode: OpenSSL::SSL::VERIFY_PEER, timeout: 120)
 
   DEFAULT_BASE_URL = "https://graphql.klutchcard.com/graphql"
+  TRANSACTION_PAGE_SIZE = 100
+  MAX_TRANSACTION_PAGES = 25
 
   class Error < StandardError
     attr_reader :error_type
@@ -44,17 +44,10 @@ class Provider::Klutch
   end
 
   # Fetch all cards on the account.
-  # Returns an array of hashes: [{ id:, name:, status:, lastFour:, ... }]
+  # Returns an array of hashes: [{ id:, name:, lastFour: }]
   def list_cards
     data = execute(CARDS_QUERY, operation_name: "list_cards")
     normalize_list(data[:cards])
-  end
-
-  # Fetch basic account information (owner, id).
-  # Returns a hash or nil.
-  def get_account
-    data = execute(ACCOUNT_QUERY, operation_name: "get_account")
-    data[:account]
   end
 
   # Fetch the account's outstanding balance and credit limit.
@@ -83,15 +76,51 @@ class Provider::Klutch
   # statuses: array of transaction statuses (e.g. %w[SETTLED PENDING])
   # types:    array of transaction types (e.g. %w[CHARGE PAYMENT])
   # Returns an array of transaction hashes.
-  def get_transactions(start_date:, end_date: Date.current, statuses: nil, types: nil)
+  def get_transactions(start_date:, end_date: Date.current, statuses: nil, types: nil, on_page: nil)
     filter = build_transaction_filter(start_date: start_date, end_date: end_date, statuses: statuses, types: types)
-    data = execute(TRANSACTIONS_QUERY, variables: { filter: filter }, operation_name: "get_transactions")
-    normalize_list(data[:transactions])
+    transactions = []
+    seen_cursors = Set.new
+    cursor = nil
+    page_count = 0
+
+    loop do
+      if page_count >= MAX_TRANSACTION_PAGES
+        raise Error.new("Klutch transaction pagination exceeded #{MAX_TRANSACTION_PAGES} pages", :pagination_error)
+      end
+
+      page_count += 1
+      on_page&.call
+
+      data = execute(
+        TRANSACTIONS_QUERY,
+        variables: {
+          filter: filter,
+          sortOrder: "DESC",
+          limit: TRANSACTION_PAGE_SIZE,
+          nextCursor: cursor
+        },
+        operation_name: "get_transactions"
+      )
+      page = data[:transactionsPaginated].to_h.with_indifferent_access
+      transactions.concat(normalize_list(page[:list]))
+
+      next_cursor = page[:nextCursor].presence
+      break if next_cursor.blank?
+
+      if seen_cursors.include?(next_cursor)
+        raise Error.new("Klutch transaction pagination returned a repeated cursor", :pagination_error)
+      end
+
+      seen_cursors.add(next_cursor)
+      cursor = next_cursor
+    end
+
+    transactions
   end
 
   # Aggregate the amount of transactions within a window. Used as a fallback for
   # balance derivation when the revolving-loan balance (see #get_balance) is
-  # unavailable. Returns a BigDecimal (raw Klutch sign: charges are negative).
+  # unavailable. Returns a BigDecimal.
   def sum_transactions(start_date:, end_date: Date.current, statuses: nil, types: nil)
     filter = build_transaction_filter(start_date: start_date, end_date: end_date, statuses: statuses, types: types)
     data = execute(SUM_TRANSACTIONS_QUERY, variables: { filter: filter }, operation_name: "sum_transactions")
@@ -124,16 +153,7 @@ class Provider::Klutch
         cards {
           id
           name
-          status
           lastFour
-        }
-      }
-    GRAPHQL
-
-    ACCOUNT_QUERY = <<~GRAPHQL
-      query AccountInfo {
-        account {
-          id
         }
       }
     GRAPHQL
@@ -150,24 +170,26 @@ class Provider::Klutch
     GRAPHQL
 
     TRANSACTIONS_QUERY = <<~GRAPHQL
-      query Transactions($filter: TransactionFilter) {
-        transactions(filter: $filter) {
-          id
-          amount
-          originalAmount
-          merchantName
-          transactionStatus
-          transactionType
-          transactionDate
-          declineReason
-          card {
+      query TransactionsPaginated($filter: TransactionFilter, $sortOrder: TransactionSortOrder, $limit: Int, $nextCursor: String) {
+        transactionsPaginated(filter: $filter, sortOrder: $sortOrder, limit: $limit, nextCursor: $nextCursor) {
+          nextCursor
+          list {
             id
-            name
-            lastFour
-          }
-          category {
-            id
-            name
+            amount
+            merchantName
+            transactionStatus
+            transactionType
+            transactionDate
+            declineReason
+            card {
+              id
+              name
+              lastFour
+            }
+            category {
+              id
+              name
+            }
           }
         }
       }

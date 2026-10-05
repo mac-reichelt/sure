@@ -4,6 +4,8 @@ class KlutchAccount < ApplicationRecord
   include CurrencyNormalizable, Encryptable
   include KlutchAccount::DataHelpers
 
+  CARD_ACCOUNT_ID = "card_primary"
+
   if encryption_ready?
     encrypts :raw_payload
     encrypts :raw_transactions_payload
@@ -22,6 +24,10 @@ class KlutchAccount < ApplicationRecord
   scope :with_linked, -> { joins(:account_provider) }
   scope :without_linked, -> { left_joins(:account_provider).where(account_providers: { id: nil }) }
   scope :ordered, -> { order(created_at: :desc) }
+
+  def self.card_account_id
+    CARD_ACCOUNT_ID
+  end
 
   # Callbacks
   after_destroy :enqueue_connection_cleanup

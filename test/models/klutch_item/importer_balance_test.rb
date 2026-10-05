@@ -13,7 +13,7 @@ class KlutchItem::ImporterBalanceTest < ActiveSupport::TestCase
     )
     @klutch_account = @item.klutch_accounts.create!(
       name: "Klutch Card",
-      klutch_account_id: "klutch-account-1",
+      klutch_account_id: KlutchAccount.card_account_id,
       currency: "USD",
       current_balance: BigDecimal("-10")
     )
@@ -90,25 +90,40 @@ class KlutchItem::ImporterBalanceTest < ActiveSupport::TestCase
     assert_equal "settled_transactions", fallback_log.metadata["balance_source"]
   end
 
-  test "keeps linked account when fetching account information fails" do
-    @provider.expects(:list_cards).twice.returns([])
-    @provider.expects(:get_account).twice.returns(id: @klutch_account.klutch_account_id)
-      .then.raises(Provider::Klutch::Error.new("account endpoint unavailable", :server_error))
+  test "uses the same synthetic account id on repeated imports without pruning it" do
+    cards = [ { id: "card-1", name: "Virtual Card", lastFour: "4242" } ]
+    @item.klutch_accounts.create!(
+      name: "Stale account",
+      klutch_account_id: "stale-account",
+      currency: "USD"
+    )
+    @provider.expects(:list_cards).twice.returns(cards)
+    @provider.expects(:get_account).never
 
-    assert_difference "DebugLogEntry.count", 1 do
-      @importer.send(:import_accounts, @item.klutch_credentials)
-      @importer.send(:import_accounts, @item.klutch_credentials)
-    end
+    @importer.send(:import_accounts)
+    @importer.send(:import_accounts)
 
-    assert_equal [ @klutch_account.id ], @item.klutch_accounts.pluck(:id)
+    assert_equal [ KlutchAccount.card_account_id ], @item.klutch_accounts.pluck(:klutch_account_id)
+    assert_equal KlutchAccount.card_account_id, @klutch_account.reload.klutch_account_id
     assert_equal accounts(:credit_card), @klutch_account.account_provider.reload.account
   end
 
-  test "counts the two API requests during account import" do
+  test "counts the cards API request during account import" do
     @provider.expects(:list_cards).once.returns([])
-    @provider.expects(:get_account).once.returns(id: @klutch_account.klutch_account_id)
 
-    @importer.send(:import_accounts, @item.klutch_credentials)
+    @importer.send(:import_accounts)
+
+    assert_equal 1, @importer.send(:stats)["api_requests"]
+  end
+
+  test "counts every transaction page and requests all documented transaction types" do
+    @provider.expects(:get_transactions).with do |types:, on_page:, **|
+      assert_equal %w[CHARGE PAYMENT REFUND OTHER], types
+      2.times { on_page.call }
+      true
+    end.returns([])
+
+    @importer.send(:import_transactions, @klutch_account)
 
     assert_equal 2, @importer.send(:stats)["api_requests"]
   end
