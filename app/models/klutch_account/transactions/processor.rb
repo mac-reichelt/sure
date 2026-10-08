@@ -93,7 +93,7 @@ class KlutchAccount::Transactions::Processor
       amount = parse_transaction_amount(data)
       return nil if amount.nil?
 
-      date = parse_date(data[:transactionDate] || data[:date])
+      date = parse_date(data[:transactionDate] || data[:date], family: klutch_account.klutch_item.family)
       return nil if date.nil?
 
       name = data[:merchantName].presence || data[:description].presence || "Transaction"

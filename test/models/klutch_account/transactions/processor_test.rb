@@ -86,6 +86,50 @@ class KlutchAccount::Transactions::ProcessorTest < ActiveSupport::TestCase
     assert_equal "PENDING", entry.transaction.extra.dig("klutch", "status")
   end
 
+  test "converts transaction timestamp to the family's timezone" do
+    @family.update!(timezone: "America/Los_Angeles")
+    klutch_account = create_klutch_account("kl_timezone", raw_transactions: [
+      {
+        "id" => "tx_timezone", "amount" => "10.0", "transactionType" => "CHARGE",
+        "transactionDate" => "2026-10-08T00:30:00Z"
+      }
+    ])
+
+    KlutchAccount::Transactions::Processor.new(klutch_account).process
+
+    entry = @account.entries.find_by(external_id: "tx_timezone", source: "klutch")
+    assert_equal Date.new(2026, 10, 7), entry.date
+  end
+
+  test "keeps date-only transaction dates unchanged" do
+    @family.update!(timezone: "America/Los_Angeles")
+    klutch_account = create_klutch_account("kl_date_only", raw_transactions: [
+      {
+        "id" => "tx_date_only", "amount" => "10.0", "transactionType" => "CHARGE",
+        "transactionDate" => "2026-10-08"
+      }
+    ])
+
+    KlutchAccount::Transactions::Processor.new(klutch_account).process
+
+    entry = @account.entries.find_by(external_id: "tx_date_only", source: "klutch")
+    assert_equal Date.new(2026, 10, 8), entry.date
+  end
+
+  test "skips transactions with a nil date" do
+    klutch_account = create_klutch_account("kl_nil_date", raw_transactions: [
+      {
+        "id" => "tx_nil_date", "amount" => "10.0", "transactionType" => "CHARGE",
+        "transactionDate" => nil, "date" => nil
+      }
+    ])
+
+    result = KlutchAccount::Transactions::Processor.new(klutch_account).process
+
+    assert_equal 1, result[:failed]
+    assert_nil @account.entries.find_by(external_id: "tx_nil_date", source: "klutch")
+  end
+
   test "skips transactions with blank external ids" do
     klutch_account = create_klutch_account("kl_blank", raw_transactions: [
       {
