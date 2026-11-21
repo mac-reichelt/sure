@@ -92,6 +92,16 @@ class Api::V1::FamilyExportsControllerTest < ActionDispatch::IntegrationTest
     assert_equal @family.id, export.family_id
   end
 
+  test "creates a family export from an empty JSON request" do
+    [ "", "{}" ].each do |body|
+      assert_difference("@family.family_exports.count") do
+        post api_v1_family_exports_url, params: body, headers: api_headers(@api_key).merge("Content-Type" => "application/json")
+      end
+
+      assert_response :accepted
+    end
+  end
+
   test "read-only key cannot create a family export" do
     assert_no_difference("@family.family_exports.count") do
       post api_v1_family_exports_url, headers: api_headers(@read_only_api_key)
@@ -110,6 +120,17 @@ class Api::V1::FamilyExportsControllerTest < ActionDispatch::IntegrationTest
 
     assert_response :unprocessable_entity
     assert_equal "invalid_params", JSON.parse(response.body)["error"]
+  end
+
+  test "create rejects unsupported params in a JSON body" do
+    [ { status: "completed" }, { family_export: { status: "completed" } }, { unknown: "value" } ].each do |payload|
+      assert_no_difference("@family.family_exports.count") do
+        post api_v1_family_exports_url, params: payload, headers: api_headers(@api_key), as: :json
+      end
+
+      assert_response :unprocessable_entity
+      assert_equal "invalid_params", JSON.parse(response.body)["error"]
+    end
   end
 
   test "non-admin cannot access family exports" do
@@ -143,7 +164,7 @@ class Api::V1::FamilyExportsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "record_not_found", JSON.parse(response.body)["error"]
   end
 
-  test "redirects completed export downloads to the attached file" do
+  test "sends completed export downloads without a session" do
     export = @family.family_exports.create!(status: "completed")
     export.export_file.attach(
       io: StringIO.new("test zip content"),
@@ -152,9 +173,10 @@ class Api::V1::FamilyExportsControllerTest < ActionDispatch::IntegrationTest
     )
 
     get download_api_v1_family_export_url(export), headers: api_headers(@read_only_api_key)
-    assert_response :redirect
-    assert_includes response.location, "/rails/active_storage/blobs/redirect/"
-    assert_includes response.location, "test.zip"
+    assert_response :success
+    assert_equal "test zip content", response.body
+    assert_equal "application/zip", response.media_type
+    assert_match(/\Aattachment; filename="test.zip"/, response.headers["Content-Disposition"])
   end
 
   test "download returns conflict when export is not ready" do
@@ -167,7 +189,7 @@ class Api::V1::FamilyExportsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "export_not_ready", json_response["error"]
   end
 
-  test "download handles storage URL failures without leaking details" do
+  test "download handles storage failures without leaking details" do
     export = @family.family_exports.create!(status: "completed")
     export.export_file.attach(
       io: StringIO.new("test zip content"),
@@ -175,16 +197,13 @@ class Api::V1::FamilyExportsControllerTest < ActionDispatch::IntegrationTest
       content_type: "application/zip"
     )
 
-    Api::V1::FamilyExportsController.any_instance
-      .stubs(:rails_blob_url)
+    ActiveStorage::Blob.any_instance
+      .stubs(:download)
       .raises(StandardError, "storage down")
 
     get download_api_v1_family_export_url(export), headers: api_headers(@read_only_api_key)
+    # The file is streamed, so a storage failure ends the response with a bare 500.
     assert_response :internal_server_error
-
-    json_response = JSON.parse(response.body)
-    assert_equal "internal_server_error", json_response["error"]
-    assert_equal "An unexpected error occurred", json_response["message"]
     assert_not_includes response.body, "storage down"
   end
 

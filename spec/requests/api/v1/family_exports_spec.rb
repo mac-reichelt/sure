@@ -55,8 +55,6 @@ RSpec.describe "Api::V1::FamilyExports", type: :request do
         description: "Family export creation does not accept request parameters."
       }
 
-      let(:body) { {} }
-
       response "202", "family export queued" do
         schema "$ref" => "#/components/schemas/FamilyExportResponse"
         run_test!
@@ -124,7 +122,12 @@ RSpec.describe "Api::V1::FamilyExports", type: :request do
       security [ apiKeyAuth: [] ]
       produces "application/json"
 
-      response "302", "family export download redirected" do
+      response "200", "family export zip file" do
+        # The file is streamed as application/zip; only the error responses are JSON.
+        metadata[:response][:content] = {
+          "application/zip" => { schema: { type: :string, format: :binary } }
+        }
+
         before do
           family_export.export_file.attach(
             io: StringIO.new("test zip content"),

@@ -17,7 +17,8 @@ class Security::Resolver
     exact_match_from_db ||
       exact_match_from_provider ||
       close_match_from_provider ||
-      offline_security
+      db_match_held_for_retry ||
+      offline_security(reason: provider_search_technical_failure? ? "resolution_pending" : nil)
   end
 
   private
@@ -37,7 +38,14 @@ class Security::Resolver
       value.to_s
     end
 
-    def offline_security
+    # reason: nil means "provider search ran successfully and genuinely found
+    # no match" — the pre-existing, generic offline fallback. A non-nil reason
+    # (currently only "resolution_pending", see provider_search_technical_failure?)
+    # means the search itself failed technically (rate limit/timeout/error),
+    # so we don't yet know whether the security exists — a future retry
+    # (e.g. the next daily import run) should attempt resolution again rather
+    # than treating this as a confirmed non-match.
+    def offline_security(reason: nil)
       security = Security.find_or_initialize_by_ticker_and_exchange(
         ticker: symbol,
         exchange_operating_mic: exchange_operating_mic
@@ -47,8 +55,35 @@ class Security::Resolver
         country_code: country_code,
         offline: true # This tells us that we shouldn't try to fetch prices later
       )
+      # Don't clobber a more specific existing reason (e.g. "provider_disabled",
+      # "health_check_failed") with "resolution_pending" — only write a new
+      # reason when the record doesn't already have a more specific one.
+      # A successful search without a match settles an earlier
+      # "resolution_pending", so later resolves use the DB fast path again.
+      if reason.present?
+        security.offline_reason = reason if security.offline_reason.blank?
+      elsif security.offline_reason == "resolution_pending"
+        security.offline_reason = nil
+      end
 
       security.save!
+
+      if reason == "resolution_pending"
+        DebugLogEntry.capture(
+          category: "security_resolution",
+          level: "warn",
+          message: "Could not resolve security: provider search failed technically (not a confirmed no-match)",
+          source: self.class.name,
+          provider_key: provider_search_technical_failure_keys.first,
+          metadata: {
+            security_id: security.id,
+            ticker: symbol,
+            exchange_operating_mic: exchange_operating_mic,
+            country_code: country_code,
+            failed_providers: provider_search_technical_failure_keys
+          }
+        )
+      end
 
       security
     end
@@ -62,6 +97,36 @@ class Security::Resolver
 
       return nil unless security
 
+      # Without an exchange, the lookup above returns whichever row for the
+      # ticker sorts first. While a placeholder exists, retry the provider so
+      # a successful search can fold it into the listed row, and fall back to
+      # the listed row if the search fails or finds nothing.
+      if exchange_operating_mic.blank? && (placeholder = pending_placeholder_for(symbol))
+        @db_match_held_for_retry = resolution_pending?(security) ? listed_row_besides(placeholder) : security
+        return nil
+      end
+
+      # A "resolution_pending" record means the last provider search failed
+      # technically (rate limit/timeout), not that the security is a
+      # confirmed no-match. Skip the DB fast path so this resolution attempt
+      # actually retries the provider instead of returning the same stale
+      # offline record forever.
+      return nil if resolution_pending?(security)
+
+      use_db_match(security)
+    end
+
+    def listed_row_besides(placeholder)
+      scope = Security.where("UPPER(ticker) = ?", symbol).where.not(id: placeholder.id).order(:id)
+      scope = scope.where(country_code: country_code) if country_code.present?
+      scope.detect { |security| !resolution_pending?(security) }
+    end
+
+    def db_match_held_for_retry
+      use_db_match(@db_match_held_for_retry) if @db_match_held_for_retry
+    end
+
+    def use_db_match(security)
       # When the caller provides an explicit provider (e.g. user selected from
       # search results), honor that choice. Automated syncs (Plaid, SimpleFIN)
       # pass price_provider: nil and will not overwrite.
@@ -124,6 +189,9 @@ class Security::Resolver
       match = sorted_candidates.first
 
       return nil unless match
+      # The row held back from the DB fast path is an exact ticker match;
+      # a search that only offers other tickers does not replace it.
+      return nil if @db_match_held_for_retry && match.ticker&.upcase.to_s != symbol
 
       find_or_create_provider_match!(match)
     end
@@ -133,8 +201,20 @@ class Security::Resolver
         ticker: match.ticker,
         exchange_operating_mic: match.exchange_operating_mic
       )
+      security = settle_pending_placeholder(security, match)
 
       security.country_code = match.country_code
+
+      # Backfill the name straight from the search result — it's already
+      # available here and doesn't depend on a later, separate
+      # fetch_security_info/profile call succeeding. Some providers (e.g.
+      # TwelveData on lower plan tiers) gate /profile entirely regardless of
+      # symbol, so without this the name would never populate at all. Only
+      # fills a blank name — never overwrites an existing (possibly
+      # user-edited) one. Deliberately does NOT copy logo_url: that stays
+      # sourced from fetch_security_info/Brandfetch so existing coverage for
+      # those paths is unaffected.
+      security.name = match.name if match.name.present? && security.name.blank?
 
       # Set provider when explicitly provided (user selection) or when the
       # record is new / has no provider yet. Automated syncs pass nil and
@@ -153,12 +233,53 @@ class Security::Resolver
       security
     end
 
-    # If a security was marked offline (e.g. its provider was temporarily
-    # removed in settings) but now has a valid, enabled provider, bring it
-    # back online so the MarketDataImporter picks it up again.
+    # A search that fails technically for a ticker without an exchange leaves
+    # a blank-MIC "resolution_pending" placeholder. Once an exchange-less
+    # lookup, the kind that created it, finds the ticker on an exchange, the
+    # placeholder is that instrument: it becomes the listed row, or is merged
+    # into it after commit when one already exists. Left alone, it would keep
+    # receiving holdings whenever a later search failed, splitting one
+    # position across two securities. A lookup for an explicit exchange says nothing about
+    # which listing the placeholder stood for.
+    def settle_pending_placeholder(security, match)
+      return security if exchange_operating_mic.present? || security.exchange_operating_mic.blank?
+
+      placeholder = pending_placeholder_for(match.ticker)
+      return security unless placeholder
+
+      if security.new_record?
+        placeholder.exchange_operating_mic = security.exchange_operating_mic
+        placeholder
+      else
+        SecurityPlaceholderSettlementJob.perform_later(placeholder.id, security.id)
+        security
+      end
+    end
+
+    def pending_placeholder_for(ticker)
+      placeholder = Security.find_by_ticker_and_exchange(ticker: ticker, match_blank_mic: true)
+      placeholder if placeholder && resolution_pending?(placeholder)
+    end
+
+    def resolution_pending?(security)
+      security.offline? && security.offline_reason == "resolution_pending"
+    end
+
+    # If a security was marked offline, bring it back online whenever we have
+    # a good reason to trust it can now be priced: either its provider was
+    # temporarily disabled and is available again ("provider_disabled"), or
+    # a provider search just found it again after a prior technical failure
+    # ("resolution_pending"), or the caller explicitly passed a price_provider
+    # — meaning the user picked this exact security+provider combination from
+    # search results, which we trust the same way
+    # HoldingsController#remap_security already does unconditionally.
+    # Automated syncs (Plaid, SimpleFIN, imports) pass price_provider: nil and
+    # won't trigger the explicit-selection path, so a security that went
+    # offline for other reasons (e.g. "health_check_failed") stays offline
+    # until a human explicitly re-confirms it.
     def reactivate_if_provider_available!(security)
       return unless security.offline?
-      return unless security.offline_reason == "provider_disabled"
+      return unless price_provider.present? || %w[provider_disabled resolution_pending].include?(security.offline_reason)
       return unless security.price_data_provider.present?
 
       security.update!(offline: false, offline_reason: nil, failed_fetch_count: 0, failed_fetch_at: nil)
@@ -185,7 +306,23 @@ class Security::Resolver
         country_code: country_code
       }.compact_blank
 
-      @provider_search_result ||= Security.search_provider(symbol, **params)
+      @provider_search_result ||= Security.search_provider(
+        symbol,
+        technical_failure: ->(provider) { (@provider_search_technical_failure_keys ||= []) << provider.class.name.demodulize.underscore },
+        **params
+      )
+    end
+
+    # True when at least one enabled provider's search request errored/timed
+    # out rather than answering with zero results. Only meaningful after
+    # provider_search_result has run (close_match_from_provider always calls
+    # it before resolve reaches the offline_security fallback).
+    def provider_search_technical_failure?
+      provider_search_technical_failure_keys.any?
+    end
+
+    def provider_search_technical_failure_keys
+      @provider_search_technical_failure_keys || []
     end
 
     # Non-exhaustive list of common country codes for help in choosing "close" matches

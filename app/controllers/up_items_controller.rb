@@ -107,7 +107,7 @@ class UpItemsController < ApplicationController
     @up_item = requested_up_item
 
     unless @up_item.credentials_configured?
-      redirect_to settings_providers_path, alert: t(".no_credentials_configured")
+      frame_redirect_to settings_providers_path, alert: t(".no_credentials_configured")
       return
     end
 
@@ -354,9 +354,6 @@ class UpItemsController < ApplicationController
 
     # Create and sync a Sure account from an Up account snapshot.
     def create_account_from_up(up_account, account_type)
-      # Linking an account clears any prior skip so a future unlink re-prompts for setup.
-      up_account.update!(ignored: false) if up_account.ignored?
-
       balance = up_account.current_balance || 0
       balance = balance.abs if account_type == "Loan"
       subtype = if account_type == "Depository" && up_account.suggested_account_type == account_type

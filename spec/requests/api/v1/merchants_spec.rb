@@ -64,17 +64,17 @@ RSpec.describe 'API V1 Merchants', type: :request do
                   }
                 }
 
+      let(:file) do
+        Rack::Test::UploadedFile.new(
+          StringIO.new("name,color,website_url\nCoffee Shop,#e99537,https://coffeeshop.com"),
+          'text/csv',
+          true,
+          original_filename: 'merchants.csv'
+        )
+      end
+
       response '201', 'merchants imported' do
         schema '$ref' => '#/components/schemas/MerchantImportResult'
-
-        let(:file) do
-          Rack::Test::UploadedFile.new(
-            StringIO.new("name,color,website_url\nCoffee Shop,#e99537,https://coffeeshop.com"),
-            'text/csv',
-            true,
-            original_filename: 'merchants.csv'
-          )
-        end
 
         run_test!
       end
@@ -82,6 +82,21 @@ RSpec.describe 'API V1 Merchants', type: :request do
       response '401', 'unauthorized' do
         schema '$ref' => '#/components/schemas/ErrorResponse'
         let(:'X-Api-Key') { nil }
+        run_test!
+      end
+
+      response '403', 'guest users cannot import merchants' do
+        schema '$ref' => '#/components/schemas/ErrorResponse'
+
+        let(:user) do
+          family.users.create!(
+            email: 'api-guest@example.com',
+            password: 'password123',
+            password_confirmation: 'password123',
+            role: 'guest'
+          )
+        end
+
         run_test!
       end
 
