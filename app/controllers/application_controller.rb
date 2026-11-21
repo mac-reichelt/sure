@@ -5,6 +5,7 @@ class ApplicationController < ActionController::Base
           PreviewGateable
   include Pundit::Authorization
   include CodespacesForgeryProtection
+  include WebUsageTracking
 
   include Pagy::Backend
 
@@ -20,33 +21,24 @@ class ApplicationController < ActionController::Base
   helper_method :demo_config, :demo_host_match?, :show_demo_warning?, :current_sidekiq_health
 
   private
-    def accept_pending_invitation_for(user)
-      return false if user.blank?
-
-      token = session[:pending_invitation_token]
-      return false if token.blank?
-
-      invitation = Invitation.pending.find_by(token: token.to_s)
-      return false unless invitation
-      return false unless invitation.accept_for(user)
-
-      session.delete(:pending_invitation_token)
-      true
-    end
-
-    def store_pending_invitation_if_valid
-      token = params[:invitation].to_s.presence
-      return if token.blank?
-
-      invitation = Invitation.pending.find_by(token: token)
-      session[:pending_invitation_token] = token if invitation
-    end
-
     def require_admin!
       return if Current.user&.admin?
 
       respond_to do |format|
         format.html { redirect_to accounts_path, alert: t("shared.require_admin") }
+        format.turbo_stream { head :forbidden }
+        format.json { head :forbidden }
+        format.any { head :forbidden }
+      end
+    end
+
+    # Guests are read-only by design: they may view family configuration but
+    # never change it.
+    def require_non_guest!
+      return if Current.user && !Current.user.guest?
+
+      respond_to do |format|
+        format.html { redirect_to accounts_path, alert: t("shared.require_non_guest") }
         format.turbo_stream { head :forbidden }
         format.json { head :forbidden }
         format.any { head :forbidden }

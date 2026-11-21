@@ -1,6 +1,7 @@
 require "test_helper"
 
 class RecurringTransaction::PipelineTest < ActiveSupport::TestCase
+  include FamilyLockTestHelper
   Pipeline = RecurringTransaction::Pipeline
 
   def setup
@@ -26,6 +27,53 @@ class RecurringTransaction::PipelineTest < ActiveSupport::TestCase
       # Suggested series are not active, so nothing materializes until the
       # user confirms -- the pipeline must not conjure occurrences for them.
       assert_equal 0, series.recurring_occurrences.count
+    end
+  end
+
+  test "run! removes suggestions detected from charges later confirmed as transfer legs" do
+    travel_to Date.new(2026, 8, 10) do
+      savings = accounts(:connected)
+      transfers = 3.times.map do |i|
+        date = Date.new(2026, 8, 5) << i
+        outflow = create_entry(amount: 500, date: date, name: "Move to savings")
+        inflow = savings.entries.create!(date: date, amount: -500, currency: "USD",
+                                         name: "Move from checking", entryable: Transaction.new)
+        Transfer.create!(outflow_transaction: outflow.entryable, inflow_transaction: inflow.entryable, status: "pending")
+      end
+
+      Pipeline.new(@family).run!
+      detected = @family.recurring_transactions.where(name: [ "Move to savings", "Move from checking" ])
+      assert_equal 2, detected.suggested.count, "both legs are detected while they are ordinary transactions"
+
+      transfers.each(&:confirm!)
+      Pipeline.new(@family).run!
+
+      assert_empty detected.reload
+    end
+  end
+
+  test "run! keeps a suggestion detection refreshed from ordinary charges at a new amount" do
+    travel_to Date.new(2026, 8, 10) do
+      suggestion = @family.recurring_transactions.create!(
+        account: @account, name: "Move to savings", amount: 500, currency: "USD",
+        expected_day_of_month: 5, last_occurrence_date: Date.new(2026, 5, 5),
+        next_expected_date: Date.new(2026, 6, 5), status: "suggested", occurrence_count: 3
+      )
+      savings = accounts(:connected)
+      # Older 500 charges were later confirmed as transfer legs...
+      3.times do |i|
+        date = Date.new(2026, 5, 5) << i
+        outflow = create_entry(amount: 500, date: date, name: "Move to savings")
+        inflow = savings.entries.create!(date: date, amount: -500, currency: "USD",
+                                         name: "Move from checking", entryable: Transaction.new)
+        Transfer.create!(outflow_transaction: outflow.entryable, inflow_transaction: inflow.entryable, status: "pending").confirm!
+      end
+      # ...while the bill itself kept charging, now at 520.
+      3.times { |i| create_entry(amount: 520, date: Date.new(2026, 8, 5) << i, name: "Move to savings") }
+
+      Pipeline.new(@family).run!
+
+      assert suggestion.reload.suggested?, "detection claimed it from ordinary charges this run"
     end
   end
 
@@ -114,25 +162,49 @@ class RecurringTransaction::PipelineTest < ActiveSupport::TestCase
   end
 
   test "run_with_lock! refuses to stack on a held family lock" do
-    key = Pipeline.advisory_lock_key(@family.id)
-    # Transactional tests hand every checkout the same shared fixture
-    # connection, and a session can always re-take its own advisory lock, so
-    # holding the lock needs a genuinely separate PG session.
-    config = ActiveRecord::Base.connection_pool.db_config.configuration_hash
-    other = PG.connect({
-      dbname: config[:database], host: config[:host], port: config[:port],
-      user: config[:username], password: config[:password]
-    }.compact)
-    other.exec("SELECT pg_advisory_lock(#{key})")
-
-    result = Pipeline.new(@family).run_with_lock!
+    result = with_family_lock_held_elsewhere(@family.id) { Pipeline.new(@family).run_with_lock! }
 
     assert_nil result, "a held lock reports nil rather than running"
-  ensure
-    other&.close
+  end
+
+  test "run! preloads recurrence rules for occurrence generation instead of querying per series" do
+    travel_to Date.new(2026, 8, 10) do
+      series = 3.times.map { |i| create_series(name: "PRELOAD SERIES #{i}", amount: 10 + i, day_offset: i + 1) }
+      RecurringOccurrence.where(recurring_transaction: series).delete_all
+
+      # Isolate the occurrence-generation stage: the other stages have their
+      # own query profiles and are covered by their own tests.
+      RecurringTransaction::Identifier.any_instance.stubs(:identify_recurring_patterns).returns(0)
+      RecurringTransaction::Matcher.any_instance.stubs(:repair_orphans!)
+      RecurringTransaction::Matcher.any_instance.stubs(:run!)
+      RecurringTransaction::PriceChangeDetector.any_instance.stubs(:detect!)
+
+      statements = capture_sql { Pipeline.new(@family).run! }
+
+      rule_loads = statements.grep(/FROM "recurrence_rules"/)
+      assert_equal 1, rule_loads.size,
+        "occurrence generation must load recurrence_rules in one batch, not once per series:\n#{rule_loads.join("
+")}"
+
+      series.each do |s|
+        assert s.recurring_occurrences.exists?, "generation still materializes occurrences for #{s.name}"
+      end
+    end
   end
 
   private
+
+    def capture_sql
+      statements = []
+      subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") do |*args|
+        payload = args.last
+        statements << payload[:sql] unless payload[:name].to_s =~ /SCHEMA|TRANSACTION/
+      end
+      yield
+      statements
+    ensure
+      ActiveSupport::Notifications.unsubscribe(subscriber)
+    end
 
     def create_series(amount:, day_offset:, name: nil, merchant: nil)
       due = Date.current + day_offset

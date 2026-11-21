@@ -15,6 +15,13 @@ module Family::AutoTransferMatchable
   # date_window: 30 vs. 4 widening that dialog already applies.
   MANUAL_MATCH_EXCHANGE_RATE_TOLERANCE = 0.1
 
+  # The "Transfer?" hint in the transaction list is unprompted, so it is much
+  # narrower than the dialog it opens: across a real multi-currency history,
+  # the dialog's 30 days / 10% flagged mostly coincidental small purchases,
+  # while 2 days / 3% kept mainly genuine currency conversions.
+  TRANSFER_HINT_DATE_WINDOW = 2
+  TRANSFER_HINT_EXCHANGE_RATE_TOLERANCE = 0.03
+
   # Read at call time rather than frozen into a constant at boot, so a bad value falls back
   # instead of raising inside every sync: Family::Syncer and Account::Syncer both call
   # auto_match_transfers! without a tolerance of their own.
@@ -35,11 +42,16 @@ module Family::AutoTransferMatchable
     inflow_transaction_id: nil,
     outflow_transaction_id: nil,
     account_id: nil,
+    transaction_ids: nil,
     include_rejected: true,
-    restrict_cross_currency_to_linked_accounts: false
+    restrict_cross_currency_to_linked_accounts: false,
+    require_common_writer: false,
+    exclude_same_connection_pairs: false,
+    require_compatible_categories: false
   )
     date_window = coerce_transfer_match_date_window!(date_window)
     exchange_rate_tolerance = coerce_transfer_match_exchange_rate_tolerance!(exchange_rate_tolerance)
+    window_start, window_end = transfer_match_window(transaction_ids, date_window) if transaction_ids.present?
 
     Entry.find_by_sql([
       transfer_match_candidates_sql,
@@ -50,15 +62,63 @@ module Family::AutoTransferMatchable
         inflow_transaction_id:,
         outflow_transaction_id:,
         account_id:,
+        filter_transaction_ids: !transaction_ids.nil?,
+        # IN () is invalid SQL, so an empty list binds a NULL that matches nothing.
+        transaction_ids: transaction_ids.presence || [ nil ],
+        window_start:,
+        window_end:,
         include_rejected:,
         restrict_cross_currency_to_linked_accounts:,
+        require_common_writer:,
+        exclude_same_connection_pairs:,
+        require_compatible_categories:,
         lower_exchange_rate_bound: 1 - exchange_rate_tolerance,
         upper_exchange_rate_bound: 1 + exchange_rate_tolerance
       }
     ])
   end
 
+  # Which of `transactions` have a likely transfer counterpart, so the
+  # transaction list can point the user to the "match as transfer" dialog.
+  #
+  # @return [Set<String>] ids of the given transactions that have a candidate
+  def transaction_ids_with_transfer_candidates(transactions, user:)
+    page_ids = transactions.map(&:id).to_set
+
+    transfer_hint_candidates(transactions, user:).each_with_object(Set.new) do |candidate, ids|
+      [ candidate.inflow_transaction_id, candidate.outflow_transaction_id ].each { |id| ids << id if page_ids.include?(id) }
+    end
+  end
+
+  # Both sides of every pair the "Transfer?" hint offers for any of
+  # `transactions`: rows that show the hint once these transactions are free
+  # to pair, such as after a match between them was rejected.
+  #
+  # @return [Set<String>] transaction ids, including ones outside `transactions`
+  def transfer_hint_pair_ids(transactions, user:)
+    transfer_hint_candidates(transactions, user:).each_with_object(Set.new) do |candidate, ids|
+      ids << candidate.inflow_transaction_id << candidate.outflow_transaction_id
+    end
+  end
+
+  # "Not a transfer" on a hint: rejects every pair the hint offered for this
+  # transaction, the same record a rejected auto-match leaves behind, so neither
+  # the hint nor the automatic matcher suggests them again. The manual dialog
+  # still lists them.
+  def dismiss_transfer_hint!(transaction, user:)
+    RejectedTransfer.transaction do
+      transfer_hint_candidates([ transaction ], user:).each do |candidate|
+        RejectedTransfer.find_or_create_by!(
+          inflow_transaction_id: candidate.inflow_transaction_id,
+          outflow_transaction_id: candidate.outflow_transaction_id
+        )
+      end
+    end
+  end
+
   def auto_match_transfers!(account: nil, exchange_rate_tolerance: Family::AutoTransferMatchable.exchange_rate_tolerance)
+    return if auto_match_transfers_disabled?
+
     # Exclude already matched transfers. Cross-currency FX-tolerance matching is
     # restricted to provider-linked accounts ONLY on this automatic path -- a
     # coincidental amount/FX-rate match applied here has no human reviewing it
@@ -70,17 +130,25 @@ module Family::AutoTransferMatchable
       account_id: account&.id,
       include_rejected: false,
       exchange_rate_tolerance:,
-      restrict_cross_currency_to_linked_accounts: true
+      restrict_cross_currency_to_linked_accounts: true,
+      # Only pair accounts that at least one member can write to on both sides, so
+      # someone can always confirm or reject the match.
+      require_common_writer: true,
+      # Pairs a provider already links from its own feed, such as two balances
+      # of one connection (Provider::Base.auto_match_exclusion_sql), are never
+      # guessed here; the manual dialog still offers them.
+      exclude_same_connection_pairs: true,
+      # A cross-currency guess between two categorized transactions in different
+      # categories (a fuel purchase against an income) is not one movement of
+      # money. One uncategorized leg still matches, since providers often
+      # categorize only one side. Exact same-currency pairs, and pairs on a route
+      # the user has confirmed before, are not affected.
+      require_compatible_categories: true
     )
-    transaction_ids = candidates_scope.flat_map do |match|
-      [ match.inflow_transaction_id, match.outflow_transaction_id ]
-    end.uniq
-    transactions_by_id = Transaction.includes(entry: :account).where(id: transaction_ids).index_by(&:id)
 
     # Track which transactions we've already matched to avoid duplicates
     used_transaction_ids = Set.new
-    investment_category = nil
-    investment_category_loaded = false
+    created_transfers = []
 
     Transfer.transaction do
       candidates_scope.each do |match|
@@ -88,38 +156,71 @@ module Family::AutoTransferMatchable
                used_transaction_ids.include?(match.outflow_transaction_id)
 
         # Skip this candidate when the transfer for this exact pair was not created
-        # (a concurrent sync claimed one of the transactions for a different pairing);
-        # marking it matched here would leave a transaction matched with no Transfer.
-        next unless find_or_create_transfer!(match)
+        # (a concurrent sync claimed one of the transactions for a different pairing).
+        # A created transfer stays pending and leaves the transaction kinds untouched
+        # until the user confirms it (Transfer#confirm!).
+        transfer = find_or_create_transfer!(match)
+        next unless transfer
 
-        inflow_transaction = transactions_by_id.fetch(match.inflow_transaction_id)
-        outflow_transaction = transactions_by_id.fetch(match.outflow_transaction_id)
-        destination_account = inflow_transaction.entry.account
-        transfer_kind = Transfer.kind_for_account(destination_account)
-
-        # The kind is determined by the DESTINATION account (inflow), matching Transfer::Creator logic
-        inflow_transaction.update!(kind: "funds_movement")
-        outflow_transaction.update!(kind: transfer_kind)
-
-        # Assign Investment Contributions category for transfers to investment accounts
-        if transfer_kind == "investment_contribution"
-          outflow_txn = outflow_transaction
-          if outflow_txn.category_id.blank?
-            unless investment_category_loaded
-              investment_category = investment_contributions_category
-              investment_category_loaded = true
-            end
-            outflow_txn.update!(category: investment_category) if investment_category.present?
-          end
-        end
-
+        created_transfers << transfer if transfer.previously_new_record?
         used_transaction_ids << match.inflow_transaction_id
         used_transaction_ids << match.outflow_transaction_id
       end
     end
+
+    sync_principal_only_loan_accounts(created_transfers)
   end
 
   private
+    # A principal-only loan replays a linked transfer as principal. The balance
+    # was materialized before this match existed, so re-sync from the transfer's
+    # entry dates.
+    def sync_principal_only_loan_accounts(transfers)
+      transfers.each do |transfer|
+        next unless principal_only_loan_transfer?(transfer)
+
+        transfer.sync_account_later
+      end
+    end
+
+    def principal_only_loan_transfer?(transfer)
+      [ transfer.from_account, transfer.to_account ].compact.any? do |account|
+        account.loan? && account.loan.amortizable? && account.loan.principal_only_transfers?
+      end
+    end
+
+    # The hint's candidate pairs for `transactions`: the narrower hint window and
+    # tolerance, no rejected pairs, both legs in the same category (or both
+    # uncategorized, since a categorized purchase against an income is not a
+    # transfer), and `user` able to write to both accounts
+    # (TransferMatchesController#create requires that).
+    def transfer_hint_candidates(transactions, user:)
+      unmatched_ids = transactions.reject { |transaction| transaction.transfer? || transaction.transfer.present? }.map(&:id)
+      return [] if unmatched_ids.empty?
+
+      candidates = transfer_match_candidates(
+        date_window: TRANSFER_HINT_DATE_WINDOW,
+        exchange_rate_tolerance: TRANSFER_HINT_EXCHANGE_RATE_TOLERANCE,
+        transaction_ids: unmatched_ids,
+        include_rejected: false
+      ).to_a
+      return [] if candidates.empty?
+
+      leg_ids = candidates.flat_map { |candidate| [ candidate.inflow_transaction_id, candidate.outflow_transaction_id ] }
+      account_ids = Entry.where(entryable_type: "Transaction", entryable_id: leg_ids).pluck(:entryable_id, :account_id).to_h
+      category_ids = Transaction.where(id: leg_ids).pluck(:id, :category_id).to_h
+      writable_account_ids = accounts.writable_by(user).pluck(:id).to_set
+
+      candidates.select do |candidate|
+        inflow_id = candidate.inflow_transaction_id
+        outflow_id = candidate.outflow_transaction_id
+
+        category_ids[inflow_id] == category_ids[outflow_id] &&
+          writable_account_ids.include?(account_ids[inflow_id]) &&
+          writable_account_ids.include?(account_ids[outflow_id])
+      end
+    end
+
     # Create the transfer for a matched candidate, tolerating a concurrent sync
     # that already inserted the same pair.
     #
@@ -159,6 +260,17 @@ module Family::AutoTransferMatchable
       )
     end
 
+    # Both legs of any pair that touches one of `transaction_ids` lie within
+    # `date_window` days of that transaction, so within the ids' date span
+    # widened by the window. The id filter spans both legs and only applies
+    # once pairs are formed; this range narrows each leg before the join and
+    # drops no pair the id filter would keep. nil when none of the ids exist.
+    def transfer_match_window(transaction_ids, date_window)
+      first, last = Entry.where(entryable_type: "Transaction", entryable_id: transaction_ids)
+                         .pick(Arel.sql("MIN(entries.date)"), Arel.sql("MAX(entries.date)"))
+      [ first - date_window, last + date_window ] if first
+    end
+
     def coerce_transfer_match_date_window!(value)
       Integer(value)
     rescue ArgumentError, TypeError
@@ -178,6 +290,52 @@ module Family::AutoTransferMatchable
       tolerance
     end
 
+    # A family member who can write to (Account.writable_by) at least one side
+    # and to every side that has an owner, so someone can always unlink the
+    # match. An owner-less account (owner_id is nullified when its owner is
+    # removed from the family) does not block pairing: nobody can write to it,
+    # but the member on the other side can still reject the match. When the
+    # owner-less side is the outflow, the match can be rejected but not
+    # confirmed or edited, as before this condition existed.
+    def common_writer_condition_sql
+      <<~SQL.squish
+        (:require_common_writer = FALSE OR EXISTS (
+          SELECT 1 FROM users writers
+          WHERE
+            writers.family_id = :family_id AND
+            (inflow_accounts.owner_id IS NULL OR #{writer_can_write_sql("inflow_accounts")}) AND
+            (outflow_accounts.owner_id IS NULL OR #{writer_can_write_sql("outflow_accounts")}) AND
+            (#{writer_can_write_sql("inflow_accounts")} OR #{writer_can_write_sql("outflow_accounts")})
+        ))
+      SQL
+    end
+
+    # With :exclude_same_connection_pairs, drops pairs that any registered provider
+    # adapter excludes through Provider::Base.auto_match_exclusion_sql. Applied in
+    # both UNION branches, since two balances of one connection may share a
+    # currency or not. Only auto_match_transfers! sets it (see the comment there);
+    # the manual "match as transfer" dialog leaves it off.
+    def provider_exclusion_condition_sql
+      exclusions = Provider::Factory.registered_adapters.filter_map do |adapter|
+        adapter.auto_match_exclusion_sql("inflow_accounts", "outflow_accounts")
+      end
+      return "TRUE" if exclusions.empty?
+
+      "(:exclude_same_connection_pairs = FALSE OR NOT (#{exclusions.map { |sql| "(#{sql})" }.join(" OR ")}))"
+    end
+
+    # Mirrors Account.writable_by for the `writers` row: owner or full_control share.
+    def writer_can_write_sql(accounts_alias)
+      <<~SQL.squish
+        (writers.id = #{accounts_alias}.owner_id OR EXISTS (
+          SELECT 1 FROM account_shares writer_shares
+          WHERE writer_shares.account_id = #{accounts_alias}.id AND
+            writer_shares.user_id = writers.id AND
+            writer_shares.permission = 'full_control'
+        ))
+      SQL
+    end
+
     # The second UNION branch below (cross-currency, FX-rate-tolerance matching) is a
     # coincidence guess -- amount x FX-rate within a tolerance band, not an exact amount
     # match -- and a manual account has no institution behind it confirming money actually
@@ -186,6 +344,11 @@ module Family::AutoTransferMatchable
     # branch additionally requires both accounts to have a live provider connection
     # (Plaid/SimpleFIN/account_providers). Manual accounts always participate in the first
     # branch's exact-amount, same-currency matching, which carries no such ambiguity.
+    # A user-confirmed transfer between the same two accounts, in the same direction,
+    # is the exception: it shows money really moves along that route (e.g. a manual
+    # RUB wallet that regularly converts into a manual THB account), so cross-currency
+    # auto-matching is allowed there too. Auto-matched transfers stay pending until the
+    # user confirms them.
     #
     # The restriction is opt-in (default false) rather than baked into the branch
     # unconditionally: Family#auto_match_transfers! passes true because a coincidental match
@@ -203,6 +366,12 @@ module Family::AutoTransferMatchable
     # them; a missing rate leaves the tolerance check NULL, which drops the pair.
     # A zero direct rate is treated as missing so it cannot mask a usable derived rate.
     #
+    # With :require_compatible_categories, the cross-currency branch also drops pairs
+    # whose legs are both categorized, in different categories, unless they lie on a
+    # confirmed route (computed only with :restrict_cross_currency_to_linked_accounts).
+    # Only auto_match_transfers! sets it; the exact same-currency branch, the manual
+    # dialog and the hint (which filters categories itself, more strictly) leave it off.
+    #
     # Candidates are ordered by match_rank before date_diff: exact same-currency matches
     # (rank 0) come before FX-tolerance guesses (rank 1). auto_match_transfers! consumes
     # candidates greedily, so without the rank a coincidental cross-currency candidate
@@ -213,6 +382,8 @@ module Family::AutoTransferMatchable
     # newlines) into single spaces -- a `--` SQL line comment anywhere in this heredoc would
     # swallow the remainder of the query. Put explanatory comments here in Ruby instead.
     def transfer_match_candidates_sql
+      provider_exclusion_condition = provider_exclusion_condition_sql
+
       <<~SQL.squish
         SELECT transfer_match_candidates.*
         FROM (
@@ -254,7 +425,14 @@ module Family::AutoTransferMatchable
             (:account_id IS NULL OR inflow_candidates.account_id = :account_id OR outflow_candidates.account_id = :account_id) AND
             (:inflow_transaction_id IS NULL OR inflow_candidates.entryable_id = :inflow_transaction_id) AND
             (:outflow_transaction_id IS NULL OR outflow_candidates.entryable_id = :outflow_transaction_id) AND
-            (:include_rejected = TRUE OR rejected_transfers.id IS NULL)
+            (:filter_transaction_ids = FALSE OR inflow_candidates.entryable_id IN (:transaction_ids) OR outflow_candidates.entryable_id IN (:transaction_ids)) AND
+            (:window_start IS NULL OR (
+              inflow_candidates.date BETWEEN :window_start AND :window_end AND
+              outflow_candidates.date BETWEEN :window_start AND :window_end
+            )) AND
+            (:include_rejected = TRUE OR rejected_transfers.id IS NULL) AND
+            #{provider_exclusion_condition} AND
+            #{common_writer_condition_sql}
           UNION ALL
           SELECT
             inflow_candidates.entryable_id AS inflow_transaction_id,
@@ -273,6 +451,8 @@ module Family::AutoTransferMatchable
             outflow_candidates.currency <> inflow_candidates.currency
           )
           JOIN accounts outflow_accounts ON outflow_accounts.id = outflow_candidates.account_id
+          JOIN transactions inflow_txns ON inflow_txns.id = inflow_candidates.entryable_id
+          JOIN transactions outflow_txns ON outflow_txns.id = outflow_candidates.entryable_id
           LEFT JOIN exchange_rates direct_rates ON (
             direct_rates.date = outflow_candidates.date AND
             direct_rates.from_currency = outflow_candidates.currency AND
@@ -287,6 +467,28 @@ module Family::AutoTransferMatchable
             inflow_family_rates.date = outflow_candidates.date AND
             inflow_family_rates.from_currency = inflow_candidates.currency AND
             inflow_family_rates.to_currency = :family_currency
+          )
+          LEFT JOIN (
+            SELECT DISTINCT
+              route_outflows.account_id AS outflow_account_id,
+              route_inflows.account_id AS inflow_account_id
+            FROM transfers confirmed_transfers
+            JOIN entries route_outflows ON (
+              route_outflows.entryable_type = 'Transaction' AND
+              route_outflows.entryable_id = confirmed_transfers.outflow_transaction_id
+            )
+            JOIN entries route_inflows ON (
+              route_inflows.entryable_type = 'Transaction' AND
+              route_inflows.entryable_id = confirmed_transfers.inflow_transaction_id
+            )
+            JOIN accounts route_accounts ON route_accounts.id = route_outflows.account_id
+            WHERE
+              :restrict_cross_currency_to_linked_accounts = TRUE AND
+              confirmed_transfers.status = 'confirmed' AND
+              route_accounts.family_id = :family_id
+          ) confirmed_routes ON (
+            confirmed_routes.outflow_account_id = outflow_candidates.account_id AND
+            confirmed_routes.inflow_account_id = inflow_candidates.account_id
           )
           LEFT JOIN transfers existing_transfers ON (
             existing_transfers.inflow_transaction_id = inflow_candidates.entryable_id OR
@@ -314,11 +516,26 @@ module Family::AutoTransferMatchable
               BETWEEN :lower_exchange_rate_bound AND :upper_exchange_rate_bound AND
             (:inflow_transaction_id IS NULL OR inflow_candidates.entryable_id = :inflow_transaction_id) AND
             (:outflow_transaction_id IS NULL OR outflow_candidates.entryable_id = :outflow_transaction_id) AND
+            (:filter_transaction_ids = FALSE OR inflow_candidates.entryable_id IN (:transaction_ids) OR outflow_candidates.entryable_id IN (:transaction_ids)) AND
+            (:window_start IS NULL OR (
+              inflow_candidates.date BETWEEN :window_start AND :window_end AND
+              outflow_candidates.date BETWEEN :window_start AND :window_end
+            )) AND
             (:include_rejected = TRUE OR rejected_transfers.id IS NULL) AND
             (
               :restrict_cross_currency_to_linked_accounts = FALSE OR
-              (#{linked_account_sql("inflow_accounts")} AND #{linked_account_sql("outflow_accounts")})
-            )
+              (#{linked_account_sql("inflow_accounts")} AND #{linked_account_sql("outflow_accounts")}) OR
+              confirmed_routes.outflow_account_id IS NOT NULL
+            ) AND
+            (
+              :require_compatible_categories = FALSE OR
+              confirmed_routes.outflow_account_id IS NOT NULL OR
+              inflow_txns.category_id IS NULL OR
+              outflow_txns.category_id IS NULL OR
+              inflow_txns.category_id = outflow_txns.category_id
+            ) AND
+            #{provider_exclusion_condition} AND
+            #{common_writer_condition_sql}
         ) transfer_match_candidates
         ORDER BY transfer_match_candidates.match_rank ASC, transfer_match_candidates.date_diff ASC
       SQL

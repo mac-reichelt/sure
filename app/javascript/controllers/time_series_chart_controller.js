@@ -1,6 +1,7 @@
 import { Controller } from "@hotwired/stimulus";
 import * as d3 from "d3";
 import { CHART_TOOLTIP_CLASSES } from "utils/chart_tooltip";
+import SettledResize from "utils/settled_resize";
 
 const parseLocalDate = d3.timeParse("%Y-%m-%d");
 
@@ -19,7 +20,7 @@ export default class extends Controller {
   _d3InitialContainerWidth = 0;
   _d3InitialContainerHeight = 0;
   _normalDataPoints = [];
-  _resizeObserver = null;
+  _settledResize = null;
   _d3DragSelectBrush = null;
   _d3DragSelectGroup = null;
   // d3 only nulls a truly zero-width selection, so 1-3px of jitter on a click
@@ -27,17 +28,24 @@ export default class extends Controller {
   // point) that is enough to straddle two data points and navigate somewhere
   // the user never aimed at, so treat anything this small as a click.
   _dragSelectMinPx = 4;
+  // y-axis domain tuning. Both are relative to the data, so the scale is
+  // resolution-independent: a chart looks the same on a phone and a 4K
+  // display — only pixel density changes.
+  _yAxisPadding = 0.12;      // breathing room above and below the series
+  _yAxisMinRelSpan = 0.015;  // smallest movement allowed to fill the chart,
+                             // as a fraction of the average balance  
 
   connect() {
     this._install();
     document.addEventListener("turbo:load", this._reinstall);
-    this._setupResizeObserver();
+    this._settledResize = new SettledResize(this.element, this._reinstall);
+    this._settledResize.start();
   }
 
   disconnect() {
     this._teardown();
     document.removeEventListener("turbo:load", this._reinstall);
-    this._resizeObserver?.disconnect();
+    this._settledResize?.stop();
   }
 
   _reinstall = () => {
@@ -60,6 +68,8 @@ export default class extends Controller {
     this._normalizeDataPoints();
     this._rememberInitialContainerSize();
     this._draw();
+    this._settledResize?.drew();
+    this.element.dispatchEvent(new CustomEvent("time-series-chart:drawn", { bubbles: true }));
   }
 
   _normalizeDataPoints() {
@@ -77,15 +87,12 @@ export default class extends Controller {
   }
 
   _draw() {
-    // Guard against invalid dimensions (e.g., when container is collapsed or not yet rendered)
-    const minWidth = 50;
-    const minHeight = 50;
-
-    if (
-      this._d3ContainerWidth < minWidth ||
-      this._d3ContainerHeight < minHeight
-    ) {
-      // Skip rendering if dimensions are invalid
+    // Guard against unmeasurable dimensions (e.g., when the container is
+    // collapsed or not yet rendered). A hidden container measures 0x0, and the
+    // ResizeObserver re-installs the chart as soon as layout gives it a real
+    // size, so skipping here only ever defers hidden charts. Small-but-real
+    // containers like the 32px-wide sidebar sparklines still render.
+    if (this._d3ContainerWidth <= 0 || this._d3ContainerHeight <= 0) {
       return;
     }
 
@@ -253,7 +260,10 @@ export default class extends Controller {
         // We know we only have 2 values
         return i === 0 ? "5em" : "-5em";
       })
-      .attr("dy", "0em");
+      .attr("dy", "0em")
+      // While the chart is stretched (utils/settled_resize), each date keeps its
+      // distance from its own edge.
+      .attr("data-settled-resize-edge", (_d, i) => (i === 0 ? "left" : "right"));
   }
 
   _drawGradientBelowTrendline() {
@@ -681,7 +691,7 @@ export default class extends Controller {
     const dataMin = d3.min(this._normalDataPoints, this._getDatumValue);
     const dataMax = d3.max(this._normalDataPoints, this._getDatumValue);
 
-    // Handle edge case where all values are the same
+    // All values identical: fall back to a fixed pad so the line sits centered.
     if (dataMin === dataMax) {
       const padding = dataMax === 0 ? 100 : Math.abs(dataMax) * 0.5;
       return d3
@@ -693,32 +703,28 @@ export default class extends Controller {
     const dataRange = dataMax - dataMin;
     const avgValue = (dataMax + dataMin) / 2;
 
-    // Calculate relative change as a percentage
-    const relativeChange = avgValue !== 0 ? dataRange / Math.abs(avgValue) : 1;
+    // Honesty floor: never let a movement smaller than _yAxisMinRelSpan of the
+    // average balance fill the chart. Trivial noise on a large balance stays
+    // visually flat; anything larger is shown at full amplitude. This replaces
+    // the previous "2x range below min / 0.5x above" padding, which squashed
+    // every small-but-real movement into a near-flat line regardless of size.
+    const minSpan = Math.abs(avgValue) * this._yAxisMinRelSpan;
+    const effectiveRange = Math.max(dataRange, minSpan);
 
-    // Dynamic baseline calculation
-    let yMin;
-    let yMax;
+    const padding = effectiveRange * this._yAxisPadding;
+    let yMin = avgValue - effectiveRange / 2 - padding;
+    let yMax = avgValue + effectiveRange / 2 + padding;
 
-    // For small relative changes (< 10%), use a tighter scale
-    if (relativeChange < 0.1 && dataMin > 0) {
-      // Start axis at a percentage below the minimum, not at 0
-      const baselinePadding = dataRange * 2; // Show 2x the data range below min
-      yMin = Math.max(0, dataMin - baselinePadding);
-      yMax = dataMax + dataRange * 0.5; // Add 50% padding above
-    } else {
-      // For larger changes or when data crosses zero, use more context
-      // Always include 0 when data is negative or close to 0
-      if (dataMin < 0 || (dataMin >= 0 && dataMin < avgValue * 0.1)) {
-        yMin = Math.min(0, dataMin * 1.1);
-      } else {
-        // Otherwise use dynamic baseline
-        yMin = dataMin - dataRange * 0.3;
-      }
-      yMax = dataMax + dataRange * 0.1;
+    // Pull the nearer bound to zero only when the data sits close to zero
+    // relative to its own scale (within 10% of the average), so a balance far
+    // from zero — positive or negative — still fills the chart with its movement.
+    if (dataMin >= 0 && dataMin < avgValue * 0.1) {
+      yMin = Math.min(0, yMin);
+    } else if (dataMax <= 0 && dataMax > avgValue * 0.1) {
+      yMax = Math.max(0, yMax);
     }
 
-    // Adjust padding for labels if needed
+    // Extra headroom when value labels are drawn above/below the line.
     if (this.useLabelsValue) {
       const extraPadding = (yMax - yMin) * 0.1;
       yMin -= extraPadding;
@@ -729,12 +735,5 @@ export default class extends Controller {
       .scaleLinear()
       .rangeRound([this._d3ContainerHeight, 0])
       .domain([yMin, yMax]);
-  }
-
-  _setupResizeObserver() {
-    this._resizeObserver = new ResizeObserver(() => {
-      this._reinstall();
-    });
-    this._resizeObserver.observe(this.element);
   }
 }

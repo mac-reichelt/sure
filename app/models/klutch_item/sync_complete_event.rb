@@ -15,14 +15,6 @@ class KlutchItem::SyncCompleteEvent
       account.broadcast_sync_complete
     end
 
-    # Update the Klutch item view
-    klutch_item.broadcast_replace_to(
-      klutch_item.family,
-      target: "klutch_item_#{klutch_item.id}",
-      partial: "klutch_items/klutch_item",
-      locals: { klutch_item: klutch_item }
-    )
-
     # Let family handle sync notifications
     klutch_item.family.broadcast_sync_complete
   end

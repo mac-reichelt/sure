@@ -22,14 +22,24 @@ class MarketDataImporter
       return
     end
 
-    # Import all securities that aren't marked as "offline" (i.e. they're available from the provider)
-    Security.online.find_each do |security|
+    # A security may be shared by accounts with different holding periods. Merge
+    # their required ranges before calling the provider once per security.
+    windows = required_security_price_windows
+
+    Security.online.where(id: windows.keys).find_each do |security|
+      window = windows.fetch(security.id)
+      next if snapshot? && window.end_date < default_start_date
+
       security.import_provider_prices(
-        start_date: get_first_required_price_date(security),
-        end_date: end_date,
+        start_date: snapshot? ? [ window.start_date, default_start_date ].max : window.start_date,
+        end_date: window.end_date,
         clear_cache: clear_cache
       )
+    end
 
+    # Details are metadata rather than prices, and import_provider_details skips
+    # the provider once a security has them, so every online security keeps them.
+    Security.online.find_each do |security|
       security.import_provider_details(clear_cache: clear_cache)
     end
   end
@@ -56,6 +66,21 @@ class MarketDataImporter
 
   private
     attr_reader :mode, :clear_cache
+
+    def required_security_price_windows
+      windows = {}
+      # Account status does not close a position; retained holdings still count.
+      accounts_with_securities = Account.where(id: Holding.select(:account_id))
+        .or(Account.where(id: Entry.where(entryable_type: "Trade").select(:account_id)))
+
+      accounts_with_securities.find_each do |account|
+        Security::Price::ImportWindows.new(account, today: end_date).to_h.each do |security_id, window|
+          windows[security_id] = window.merge(windows[security_id])
+        end
+      end
+
+      windows
+    end
 
     def snapshot?
       mode.to_sym == :snapshot
@@ -115,12 +140,6 @@ class MarketDataImporter
       end
     end
 
-    def get_first_required_price_date(security)
-      return default_start_date if snapshot?
-
-      Trade.with_entry.where(security: security).minimum(:date) || default_start_date
-    end
-
     # An approximation that grabs more than we likely need, but simplifies the logic
     def get_first_required_exchange_rate_date(from_currency:)
       return default_start_date if snapshot?
@@ -146,4 +165,9 @@ class MarketDataImporter
 
       mode.to_sym
     end
+
+    # The windows and pairs import_security_prices and import_exchange_rates
+    # request, and the last date they request; MarketDataResetJob deletes only
+    # those before re-importing.
+    public :required_security_price_windows, :required_exchange_rate_pairs, :end_date
 end

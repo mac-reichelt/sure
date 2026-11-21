@@ -116,7 +116,7 @@ class FioItemsController < ApplicationController
     @fio_item = requested_fio_item
 
     unless @fio_item.credentials_configured?
-      redirect_to settings_providers_path, alert: t(".no_credentials_configured")
+      frame_redirect_to settings_providers_path, alert: t(".no_credentials_configured")
       return
     end
 
@@ -335,9 +335,6 @@ class FioItemsController < ApplicationController
 
     # Create and sync a Sure account from the Fio account's statement header.
     def create_account_from_fio(fio_account, account_type)
-      # Linking clears any prior skip so a future unlink re-prompts for setup.
-      fio_account.update!(ignored: false) if fio_account.ignored?
-
       # Same normalization FioAccount::Processor applies: Fio reports a drawn loan or
       # overdraft negative, Sure holds a liability positive. Without it the new account
       # shows a negative debt until a sync corrects it, and the next sync may well be

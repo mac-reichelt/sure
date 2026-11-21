@@ -1,4 +1,4 @@
-<%# locals: (klutch_item:) %>
+<%# locals: (klutch_item:, visible_accounts:) %>
 
 <%= tag.div id: dom_id(klutch_item) do %>
   <details open class="group bg-container p-4 shadow-border-xs rounded-xl">
@@ -79,8 +79,8 @@
 
     <% unless klutch_item.scheduled_for_deletion? %>
       <div class="space-y-4 mt-4">
-        <% if klutch_item.accounts.any? %>
-          <%= render "accounts/index/account_groups", accounts: klutch_item.accounts %>
+        <% if visible_accounts.any? %>
+          <%= render "accounts/index/account_groups", accounts: visible_accounts %>
         <% end %>
 
         <%# Sync summary (collapsible) - using shared ProviderSyncSummary component %>

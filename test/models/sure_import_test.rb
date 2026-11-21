@@ -225,6 +225,82 @@ class SureImportTest < ActiveSupport::TestCase
     assert_equal "matched", @import.readback_verification["status"]
   end
 
+  test "readback matches when an untouched default budget is reused" do
+    category = @family.categories.create!(name: "Groceries", color: "#00FF00")
+    default_budget = @family.budgets.create!(
+      start_date: Date.parse("2024-01-01"), end_date: Date.parse("2024-01-31"), currency: "USD"
+    )
+    default_budget.budget_categories.create!(category: category, budgeted_spending: 0, currency: "USD")
+
+    attach_ndjson(build_ndjson([
+      { type: "Category", data: { id: "cat-groceries", name: "Groceries", color: "#00FF00", classification: "expense" } },
+      { type: "Budget", data: {
+        id: "budget-1", start_date: "2024-01-01", end_date: "2024-01-31",
+        budgeted_spending: "3000.00", expected_income: "5000.00", currency: "USD"
+      } },
+      { type: "BudgetCategory", data: {
+        id: "bc-1", budget_id: "budget-1", category_id: "cat-groceries", budgeted_spending: "500.00", currency: "USD"
+      } }
+    ]))
+
+    @import.import!
+    @import.reload
+
+    assert_equal "matched", @import.readback_verification["status"]
+    assert_equal({ "categories" => 1, "budgets" => 1, "budget_categories" => 1 }, @import.readback_verification["reused_record_counts"])
+  end
+
+  test "import links created accounts and entries without loading them" do
+    attach_ndjson(build_ndjson([
+      { type: "Account", data: {
+        id: "acct-1", name: "Linked Account", balance: "100.00", currency: "USD",
+        accountable_type: "Depository", accountable: { subtype: "checking" }
+      } },
+      { type: "Transaction", data: {
+        id: "txn-1", account_id: "acct-1", date: "2024-01-15", amount: "-25.00",
+        name: "Coffee", currency: "USD"
+      } }
+    ]))
+
+    result = @import.import!
+
+    assert_equal 1, result[:account_ids].size
+    assert_equal 1, result[:entry_ids].size
+    assert_equal @import.id, Account.find(result[:account_ids].first).import_id
+    assert_equal @import.id, Entry.find(result[:entry_ids].first).import_id
+    assert_not @import.accounts.loaded?
+    assert_not @import.entries.loaded?
+    assert @import.data_committed?
+  end
+
+  test "an import links only the records it created, never another import's unlinked ones" do
+    other = @family.imports.create!(type: "SureImport")
+    other_account = accounts(:depository)
+    other_entry = entries(:transaction)
+    # Records another import committed but hasn't linked yet.
+    other_account.update_columns(import_id: nil)
+    other_entry.update_columns(import_id: nil)
+
+    attach_ndjson(import_payload("first"))
+    result = @import.import!
+
+    assert_nil other_account.reload.import_id
+    assert_nil other_entry.reload.import_id
+    assert_equal result[:account_ids].sort, @import.accounts.pluck(:id).sort
+    assert_equal result[:entry_ids].sort, @import.entries.pluck(:id).sort
+
+    other.ndjson_file.attach(io: StringIO.new(import_payload("second")), filename: "second.ndjson", content_type: "application/x-ndjson")
+    other.sync_ndjson_rows_count!
+    other_result = other.import!
+
+    assert_empty result[:account_ids] & other_result[:account_ids]
+    assert_empty result[:entry_ids] & other_result[:entry_ids]
+    assert_equal result[:account_ids].sort, @import.accounts.reload.pluck(:id).sort
+    assert_equal result[:entry_ids].sort, @import.entries.reload.pluck(:id).sort
+    assert_equal other_result[:account_ids].sort, other.accounts.pluck(:id).sort
+    assert_equal other_result[:entry_ids].sort, other.entries.pluck(:id).sort
+  end
+
   test "publishes import successfully" do
     attach_ndjson(build_ndjson([
       { type: "Account", data: {
@@ -603,6 +679,20 @@ class SureImportTest < ActiveSupport::TestCase
     assert_includes codes, "missing_reference"
   end
 
+  test "preflight rejects duplicate budget category pairs" do
+    attach_ndjson(build_ndjson([
+      { type: "Category", data: { id: "cat-groceries", name: "Groceries", color: "#00FF00", classification: "expense" } },
+      { type: "Budget", data: { id: "budget-1", start_date: "2024-01-01", end_date: "2024-01-31", currency: "USD" } },
+      { type: "BudgetCategory", data: { id: "bc-1", budget_id: "budget-1", category_id: "cat-groceries", budgeted_spending: "500.00", currency: "USD" } },
+      { type: "BudgetCategory", data: { id: "bc-2", budget_id: "budget-1", category_id: "cat-groceries", budgeted_spending: "700.00", currency: "USD" } }
+    ]))
+
+    result = @import.sure_preflight
+
+    assert_not result.valid?
+    assert_includes result.errors.map { |error| error[:code] }, "duplicate_budget_category"
+  end
+
   test "preflight allows null rule names and treats orphaned rejected transfers as warnings" do
     attach_ndjson(build_ndjson([
       { type: "Rule", data: { id: "rule-1", name: nil, resource_type: "transaction" } },
@@ -764,6 +854,14 @@ class SureImportTest < ActiveSupport::TestCase
         accountable_type: "Depository",
         accountable: { subtype: "checking" }
       } },
+      { type: "Valuation", data: {
+        id: "valuation-1",
+        account_id: "account-1",
+        date: "2024-01-14",
+        amount: "1000.00",
+        currency: "USD",
+        kind: "opening_anchor"
+      } },
       { type: "ProviderMerchant", data: {
         id: "provider-merchant-1",
         name: "AMZN MKTP",
@@ -784,19 +882,56 @@ class SureImportTest < ActiveSupport::TestCase
     result = @import.sure_preflight
     assert result.valid?, result.error_message
 
-    assert_difference -> { ProviderMerchant.count }, 1 do
-      @import.publish
+    assert_no_difference -> { ProviderMerchant.count } do
+      assert_difference -> { @family.merchants.count }, 1 do
+        @import.publish
+      end
     end
 
     assert_equal "complete", @import.status
+    assert_equal "matched", @import.verification_status
 
     entry = @family.entries.find_by!(name: "Amazon purchase")
     merchant = entry.entryable.merchant
 
-    assert_instance_of ProviderMerchant, merchant
+    assert_instance_of FamilyMerchant, merchant
     assert_equal "AMZN MKTP", merchant.name
-    assert_equal "plaid", merchant.source
-    assert_equal "plaid_amzn", merchant.provider_merchant_id
+  end
+
+  # ProviderMerchant rows are shared across families and bank syncs look them up
+  # by provider_merchant_id, which most providers derive from the payee name. An
+  # import that created one would pick the name, logo and website other
+  # families' synced transactions attach to.
+  test "provider merchant import never creates a shared provider merchant" do
+    attach_ndjson(provider_merchant_ndjson(
+      name: "Call +1 555 0100 for your refund",
+      logo_url: "https://tracker.example/pixel.png",
+      website_url: "https://phish.example"
+    ))
+
+    assert_no_difference -> { ProviderMerchant.count } do
+      @import.publish
+    end
+
+    assert_equal "complete", @import.status
+    assert_equal "matched", @import.verification_status
+    assert_nil ProviderMerchant.find_by(provider_merchant_id: "plaid_amzn", source: "plaid")
+
+    merchant = @family.entries.find_by!(name: "Amazon purchase").entryable.merchant
+    assert_instance_of FamilyMerchant, merchant
+    assert_equal @family, merchant.family
+    assert_equal "https://phish.example", merchant.website_url
+  end
+
+  test "provider merchant import reuses the family's own merchant of the same name" do
+    own = @family.merchants.create!(name: "AMZN MKTP")
+    attach_ndjson(provider_merchant_ndjson)
+
+    assert_no_difference [ -> { ProviderMerchant.count }, -> { @family.merchants.count } ] do
+      @import.publish
+    end
+
+    assert_equal own, @family.entries.find_by!(name: "Amazon purchase").entryable.merchant
   end
 
   test "provider merchant import reuses an existing matching record instead of duplicating or overwriting it" do
@@ -861,45 +996,6 @@ class SureImportTest < ActiveSupport::TestCase
     assert_nil existing.logo_url
     assert_nil existing.color
     assert_equal existing.id, @family.entries.find_by!(name: "Amazon purchase").entryable.merchant_id
-  end
-
-  test "a color in the file is not read when a provider merchant is created" do
-    attach_ndjson(provider_merchant_ndjson(color: "#123456"))
-
-    assert_difference -> { ProviderMerchant.count }, 1 do
-      @import.publish
-    end
-
-    assert_equal "complete", @import.status
-    assert_nil ProviderMerchant.where(name: "AMZN MKTP", source: "plaid").pick(:color)
-  end
-
-  {
-    "RecordNotUnique" => -> { ActiveRecord::RecordNotUnique.new("duplicate key") },
-    "RecordInvalid" => -> { ActiveRecord::RecordInvalid.new(ProviderMerchant.new.tap { |merchant| merchant.errors.add(:name, :taken) }) }
-  }.each do |label, build_error|
-    test "provider merchant import recovers when another import wins the creation race (#{label})" do
-      winner = ProviderMerchant.create!(name: "AMZN MKTP", source: "plaid", provider_merchant_id: "plaid_amzn")
-      attach_ndjson(provider_merchant_ndjson)
-
-      ProviderMerchant.stubs(:find_by_import_data).returns(nil).then.returns(winner)
-      ProviderMerchant.stubs(:create!).raises(build_error.call)
-
-      assert_no_difference -> { ProviderMerchant.count } do
-        @import.import!
-      end
-
-      assert_equal winner.id, @family.entries.find_by!(name: "Amazon purchase").entryable.merchant_id
-    end
-  end
-
-  test "provider merchant import surfaces validation errors that are not a lost creation race" do
-    attach_ndjson(provider_merchant_ndjson)
-    invalid = ActiveRecord::RecordInvalid.new(ProviderMerchant.new.tap { |merchant| merchant.errors.add(:name, :blank) })
-    ProviderMerchant.stubs(:find_by_import_data).returns(nil)
-    ProviderMerchant.stubs(:create!).raises(invalid)
-
-    assert_raises(ActiveRecord::RecordInvalid) { @import.import! }
   end
 
   test "preflight warns with the actual diff when an existing provider merchant differs from the file" do
@@ -1080,6 +1176,10 @@ class SureImportTest < ActiveSupport::TestCase
           id: "account-1", name: "Provider Merchant Checking", balance: "1000.00", currency: "USD",
           accountable_type: "Depository", accountable: { subtype: "checking" }
         } },
+        { type: "Valuation", data: {
+          id: "valuation-1", account_id: "account-1", date: "2024-01-14", amount: "1000.00",
+          currency: "USD", kind: "opening_anchor"
+        } },
         { type: "ProviderMerchant", data: {
           id: "provider-merchant-1", name: "AMZN MKTP", source: "plaid", provider_merchant_id: "plaid_amzn"
         }.merge(merchant_attrs) },
@@ -1101,6 +1201,19 @@ class SureImportTest < ActiveSupport::TestCase
           amount: "11.99", currency: "USD", expected_day_of_month: 28,
           last_occurrence_date: "2026-08-28", next_expected_date: "2026-09-28"
         }.merge(recurring_attrs) }
+      ])
+    end
+
+    def import_payload(label)
+      build_ndjson([
+        { type: "Account", data: {
+          id: "acct-#{label}", name: "#{label} account", balance: "100.00", currency: "USD",
+          accountable_type: "Depository", accountable: { subtype: "checking" }
+        } },
+        { type: "Transaction", data: {
+          id: "txn-#{label}", account_id: "acct-#{label}", date: "2024-01-15", amount: "-25.00",
+          name: "#{label} coffee", currency: "USD"
+        } }
       ])
     end
 
