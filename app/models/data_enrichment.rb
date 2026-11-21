@@ -12,6 +12,7 @@ class DataEnrichment < ApplicationRecord
     fio: "fio",
     ibkr: "ibkr",
     indexa_capital: "indexa_capital",
+    klutch: "klutch",
     lunchflow: "lunchflow",
     mercury: "mercury",
     monobank: "monobank",
@@ -27,7 +28,6 @@ class DataEnrichment < ApplicationRecord
     trade_republic: "trade_republic",
     truelayer: "truelayer",
     up: "up",
-    wise: "wise",
-    klutch: "klutch"
+    wise: "wise"
   }
 end

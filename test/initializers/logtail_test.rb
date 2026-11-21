@@ -45,7 +45,7 @@ class LogtailTest < ActiveSupport::TestCase
       end
       app = stack.build(endpoint)
       env = Rack::MockRequest.env_for(
-        "https://www.example.com/logging-probe?token=synthetic-query-secret",
+        "https://www.example.com/logging-probe?token=synthetic-query-secret", # pipelock:ignore
         request_headers
       )
       # Rails::Application#call normally supplies this configuration before
