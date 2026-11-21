@@ -43,7 +43,9 @@
     <% end %>
 
     <% if @klutch_items.any? %>
-      <%= render @klutch_items.sort_by(&:created_at) %>
+      <% @klutch_items.sort_by(&:created_at).each do |item| %>
+        <%= render item, visible_accounts: visible_card_accounts(item) %>
+      <% end %>
     <% end %>
 
     <% if @akahu_items.any? %>
